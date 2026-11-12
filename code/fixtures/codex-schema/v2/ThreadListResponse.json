@@ -1,0 +1,13 @@
+{
+ "definitions": {},
+ "properties": {
+  "backwardsCursor": {},
+  "data": {},
+  "nextCursor": {}
+ },
+ "required": [
+  "data"
+ ],
+ "title": "ThreadListResponse",
+ "type": "object"
+}

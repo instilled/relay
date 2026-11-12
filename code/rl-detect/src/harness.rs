@@ -557,7 +557,40 @@ pub(crate) fn kill_group(child: &mut std::process::Child) {
 /// any hook it fires knows it for Relay's own ask (`user_hooks::ASKING`),
 /// not a session to tell of. A run that fails or takes too long is an
 /// error named by its first two words: `claude agents`.
+///
+/// One that fails as a CLI does on words it does not know (`usage_error`)
+/// is drift: the harness no longer takes what its profile says
+/// (`<program>.cli.<word>`).
 pub fn run(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration) -> Result<String> {
+    run_watched(argv, cwd, asking, wait, true)
+}
+
+/// `run`, with nothing noticed of how it fails: for what Relay asks of a
+/// harness only to learn about it (`--version`).
+pub fn run_quiet(argv: &[String], wait: Duration) -> Result<String> {
+    run_watched(argv, None, true, wait, false)
+}
+
+/// Whether a run that exited `code` with `err` on its stderr failed on its
+/// words — a subcommand or option it does not know — rather than at its
+/// work: clap's usage exit (2) with its usage, or the errors clap and
+/// commander print for one.
+pub fn usage_error(code: Option<i32>, err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    let said = [
+        "unrecognized subcommand",
+        "unexpected argument",
+        "unknown command",
+        "unknown option",
+        "unrecognized option",
+        "invalid subcommand",
+    ]
+    .iter()
+    .any(|w| e.contains(w));
+    said || (code == Some(2) && e.contains("usage:"))
+}
+
+fn run_watched(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration, watch: bool) -> Result<String> {
     let (bin, args) = argv.split_first().ok_or_else(|| anyhow!("nothing to run"))?;
     let program = Path::new(bin)
         .file_name()
@@ -647,6 +680,23 @@ pub fn run(argv: &[String], cwd: Option<&Path>, asking: bool, wait: Duration) ->
     let out = String::from_utf8_lossy(&out).into_owned();
     let err = String::from_utf8_lossy(&err).into_owned();
     if !status.success() {
+        if watch && usage_error(status.code(), &err) {
+            let program = Path::new(bin).file_name().map(|n| n.to_string_lossy().into_owned());
+            let word = args.first().map(|a| a.trim_start_matches('-')).unwrap_or("");
+            let program = program.unwrap_or_default();
+            crate::drift::notice(
+                crate::drift::Noticed::new(
+                    &program,
+                    Some(Path::new(bin)),
+                    &format!("{program}.cli.{word}"),
+                    format!(
+                        "`{what}` is not taken as Relay runs it (exit {})",
+                        status.code().unwrap_or(-1)
+                    ),
+                )
+                .with_evidence(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()),
+            );
+        }
         bail!("`{what}` failed: {}", err.lines().next().unwrap_or("no reason given"));
     }
     Ok(out)
@@ -674,6 +724,37 @@ mod tests {
         let e = run(&sh("sleep 5"), None, false, Duration::from_millis(200)).unwrap_err();
         assert!(e.to_string().contains("did not answer"), "{e}");
         assert!(at.elapsed() < Duration::from_secs(4), "given up at the wait");
+    }
+
+    #[test]
+    fn a_subcommand_the_harness_no_longer_takes_is_drift_and_a_failure_at_its_work_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("codex");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = archive ] && { echo \"error: unrecognized subcommand 'archive'\" >&2; echo 'Usage: codex [OPTIONS]' >&2; exit 2; }\necho 'no thread named x' >&2; exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let argv = |w: &str| vec![bin.display().to_string(), w.into(), "x".into()];
+        let (said, noticed) = crate::drift::capture(|| run(&argv("archive"), None, false, LIST_WAIT));
+        assert!(said.is_err());
+        assert_eq!(noticed.len(), 1);
+        assert_eq!(noticed[0].check, "codex.cli.archive");
+        assert_eq!(
+            noticed[0].what,
+            "`codex archive` is not taken as Relay runs it (exit 2)"
+        );
+        assert_eq!(
+            noticed[0].evidence.as_deref(),
+            Some("error: unrecognized subcommand 'archive'")
+        );
+        let (said, noticed) = crate::drift::capture(|| run(&argv("queue"), None, false, LIST_WAIT));
+        assert_eq!(said.unwrap_err().to_string(), "`codex queue` failed: no thread named x");
+        assert!(noticed.is_empty(), "an ordinary failure");
+        assert!(usage_error(Some(1), "error: unknown command 'rm'"), "commander's");
+        assert!(!usage_error(Some(2), "no such file"));
     }
 
     #[test]

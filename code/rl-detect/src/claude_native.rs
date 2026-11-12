@@ -27,6 +27,11 @@ use std::time::{Duration, Instant};
 /// The reader a profile's `sessions.list` names for this listing.
 pub const READER: &str = "claude-agents";
 
+/// The drift check: `claude agents --json` no longer has the shape read.
+pub const AGENTS_JSON: &str = "claude.agents_json";
+/// The drift check: `claude --bg` printed no id of what it started.
+pub const BG_ID: &str = "claude.bg_id";
+
 /// The `kind` the listing gives a session in Claude's background; the
 /// others are open in a terminal, and their hooks tell of them.
 const BACKGROUND: &str = "background";
@@ -144,7 +149,21 @@ impl Harness for Claude {
     fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
         let text = harness::run(&self.argv(&self.list), None, true, wait)?;
         let jobs = self.jobs_dir();
-        Ok(rows(&text, jobs.as_deref())?
+        // Its listing changed shape: drift, and what does not read is off
+        // the list — its sessions open in a terminal still show, by hooks.
+        if let Err(off) = shape(&text) {
+            crate::drift::notice(
+                crate::drift::Noticed::new(
+                    &self.harness,
+                    Some(Path::new(&self.bin)),
+                    AGENTS_JSON,
+                    "`claude agents --json` changed shape; sessions it lists may be missing",
+                )
+                .with_evidence(off),
+            );
+        }
+        Ok(rows(&text, jobs.as_deref())
+            .unwrap_or_default()
             .into_iter()
             .map(|mut r| {
                 r.harness = self.harness.clone();
@@ -268,6 +287,14 @@ pub fn begin(
 ) -> Result<String> {
     let printed = harness::run(argv, Some(cwd), false, harness::START_WAIT)?;
     let ids = started_ids(&printed);
+    if ids.is_empty() {
+        crate::drift::notice(crate::drift::Noticed::new(
+            crate::user_hooks::CLAUDE,
+            argv.first().map(Path::new),
+            BG_ID,
+            "`claude --bg` printed no session id",
+        ));
+    }
     let deadline = Instant::now() + listed;
     loop {
         // The whole loop, its listings too, is bounded by `listed`.
@@ -386,6 +413,43 @@ pub fn parse(text: &str) -> Result<Vec<Listed>> {
             l.kind.as_deref() == Some(BACKGROUND) && !l.id.is_empty() && !l.session_id.is_empty() && l.cwd.is_absolute()
         })
         .collect())
+}
+
+/// What every entry of `claude agents --json` must have for Relay to read
+/// it, and what one in the background must have besides: the rest
+/// (`name`, `status`, `pid`, …) may come and go, and fields Relay does not
+/// know are let be.
+pub const REQUIRED: [&str; 1] = ["kind"];
+pub const REQUIRED_BACKGROUND: [&str; 4] = ["id", "sessionId", "cwd", "state"];
+
+/// Whether `claude agents --json` still has the shape Relay reads: a list
+/// of objects, each with `REQUIRED`, each in the background with
+/// `REQUIRED_BACKGROUND`. Err: what is off, in a line of field names only —
+/// never a value.
+pub fn shape(text: &str) -> Result<(), String> {
+    let all: Vec<serde_json::Value> = match serde_json::from_str(text) {
+        Ok(serde_json::Value::Array(all)) => all,
+        Ok(_) => return Err("not a list".into()),
+        Err(_) => return Err("not JSON".into()),
+    };
+    let mut missing: Vec<&str> = Vec::new();
+    for v in &all {
+        let Some(o) = v.as_object() else {
+            return Err("an entry is not an object".into());
+        };
+        let background = o.get("kind").and_then(|k| k.as_str()) == Some(BACKGROUND);
+        let need = REQUIRED.iter().chain(REQUIRED_BACKGROUND.iter().filter(|_| background));
+        for k in need {
+            if !o.contains_key(*k) && !missing.contains(k) {
+                missing.push(k);
+            }
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("entries without {}", missing.join(", ")))
+    }
 }
 
 /// How much of the end of a job's `timeline.jsonl` is read for its last
@@ -807,6 +871,80 @@ mod tests {
     }
 
     #[test]
+    fn a_start_that_prints_no_id_is_drift_and_one_that_does_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let echo = |s: &str| vec!["echo".to_string(), s.into()];
+        let list = scripted(vec![Ok(vec![listed_at("bbbb0001", tmp.path())])]);
+        let (said, noticed) =
+            crate::drift::capture(|| begin(&list, &echo("started"), tmp.path(), &HashSet::new(), LISTED_WAIT));
+        assert!(said.is_err());
+        assert_eq!(noticed.len(), 1);
+        assert_eq!(noticed[0].check, BG_ID);
+        assert_eq!(noticed[0].harness, "claude");
+        assert_eq!(noticed[0].what, "`claude --bg` printed no session id");
+        assert_eq!(noticed[0].evidence, None, "what it printed may be a prompt: not kept");
+        let (said, noticed) =
+            crate::drift::capture(|| begin(&list, &echo("bbbb0001"), tmp.path(), &HashSet::new(), LISTED_WAIT));
+        assert_eq!(said.unwrap(), "bbbb0001");
+        assert!(noticed.is_empty());
+    }
+
+    #[test]
+    fn the_listings_shape_is_checked_by_field_names_only() {
+        assert_eq!(shape(&listed()), Ok(()), "as Claude writes it");
+        let extra = r#"[{"id":"b1","cwd":"/w","kind":"background","sessionId":"s1","state":"working","new":{"x":1}},
+                        {"kind":"interactive","cwd":"/w","sessionId":"s2"}]"#;
+        assert_eq!(
+            shape(extra),
+            Ok(()),
+            "a field it adds, and a terminal one without an id: fine"
+        );
+        let gone = r#"[{"id":"b1","cwd":"/w","kind":"background","session":"secret prompt","status":"working"}]"#;
+        assert_eq!(shape(gone), Err("entries without sessionId, state".into()));
+        assert_eq!(shape(r#"[{"id":"b1"}]"#), Err("entries without kind".into()));
+        assert_eq!(shape("{}"), Err("not a list".into()));
+        assert_eq!(shape("Usage: claude"), Err("not JSON".into()));
+        assert_eq!(shape(r#"["x"]"#), Err("an entry is not an object".into()));
+    }
+
+    /// A Claude whose `agents --json --all` prints `json`.
+    fn listing_claude(dir: &Path, json: &str) -> Claude {
+        use std::os::unix::fs::PermissionsExt;
+        let file = dir.join("agents.json");
+        std::fs::write(&file, json).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, format!("#!/bin/sh\nexec cat '{}'\n", file.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = Registry::builtin();
+        Claude::of(r.profile("claude").unwrap(), bin)
+            .unwrap()
+            .with_config_dir(dir.join("cfg"))
+    }
+
+    #[test]
+    fn a_listing_with_extra_fields_reads_and_one_without_what_is_needed_is_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let extra = r#"[{"id":"b1","cwd":"/w","kind":"background","sessionId":"s1","state":"working","mood":"new"}]"#;
+        let c = listing_claude(tmp.path(), extra);
+        let (rows, noticed) = crate::drift::capture(|| c.list().unwrap());
+        assert_eq!(rows.len(), 1);
+        assert!(noticed.is_empty(), "{noticed:?}");
+
+        let gone = r#"[{"agentId":"b1","cwd":"/w","kind":"background","conversation":"s1","state":"working"}]"#;
+        let c = listing_claude(tmp.path(), gone);
+        let (rows, noticed) = crate::drift::capture(|| c.list().unwrap());
+        assert!(rows.is_empty(), "off the list");
+        assert_eq!(noticed.len(), 1);
+        assert_eq!(noticed[0].check, AGENTS_JSON);
+        assert_eq!(noticed[0].evidence.as_deref(), Some("entries without id, sessionId"));
+
+        let c = listing_claude(tmp.path(), "{\"agents\": []}");
+        let (rows, noticed) = crate::drift::capture(|| c.list());
+        assert!(rows.unwrap().is_empty(), "not an error: the list goes on without them");
+        assert_eq!(noticed[0].evidence.as_deref(), Some("not a list"));
+    }
+
+    #[test]
     fn a_start_waits_no_longer_than_its_deadline_for_a_slow_listing() {
         // Takes whatever it is given, as a hung harness would.
         let slow = |wait: Duration| -> Result<Vec<NativeRow>> {
@@ -837,6 +975,11 @@ mod tests {
             ["claude", "--bg", "-n", "fix it", "fix the login"]
         );
         assert_eq!(c.start_argv(Some(" "), Some("")).unwrap(), ["claude", "--bg"]);
+        assert_eq!(
+            c.start_argv(None, Some("fix the login\nthen test")).unwrap(),
+            ["claude", "--bg", "fix the login\nthen test"],
+            "a prompt of several lines is one argument"
+        );
         assert_eq!(c.carry_on_argv("s-1").unwrap(), ["claude", "--resume", "s-1", "--bg"]);
         assert_eq!(c.stop_argv("ab12cd34").unwrap(), ["claude", "stop", "ab12cd34"]);
         let mut row = listed_at("ab12cd34", Path::new("/w"));

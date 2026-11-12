@@ -68,7 +68,14 @@ pub struct ListPrefs {
     /// Your colours for rows (by key), by name; a harness's own colour for
     /// a row wins over it.
     pub colors: BTreeMap<String, String>,
+    /// What a line typed on the command line starts when its first word
+    /// names no harness: `shell` (`SHELL_DEFAULT`), or an agent harness by
+    /// its profile name (`claude`), the whole line its prompt.
+    pub default: String,
 }
+
+/// `list.default` for a typed line run in a shell.
+pub const SHELL_DEFAULT: &str = "shell";
 
 impl Default for ListPrefs {
     fn default() -> Self {
@@ -82,6 +89,7 @@ impl Default for ListPrefs {
             pins: Vec::new(),
             names: BTreeMap::new(),
             colors: BTreeMap::new(),
+            default: SHELL_DEFAULT.into(),
         }
     }
 }
@@ -159,6 +167,16 @@ impl Config {
                 path.display()
             );
         }
+        let d = &file.list.default;
+        if d != SHELL_DEFAULT {
+            let registry = Registry::load(home).unwrap_or_else(|_| Registry::builtin());
+            if !registry.agents().any(|p| p.name == *d) {
+                anyhow::bail!(
+                    "{}: list.default {d:?} is not {SHELL_DEFAULT:?} or an agent harness",
+                    path.display()
+                );
+            }
+        }
         Ok(Config {
             harnesses: file.harnesses.unwrap_or_else(|| found_harnesses(home)),
             badges: file.badges,
@@ -222,6 +240,7 @@ mod tests {
         c.list.names.insert("g:/w/api".into(), "the api".into());
         c.list.colors.insert("r:a".into(), "pink".into());
         c.setup.declined.push("claude/settings/leftArrowOpensAgents".into());
+        c.list.default = "codex".into();
         c.save(&home).unwrap();
         assert_eq!(Config::load(&home).unwrap(), c);
     }
@@ -249,6 +268,24 @@ mod tests {
         std::fs::write(home.config_json(), r##"{"list": {"colors": {"r:a": "#ff88"}}}"##).unwrap();
         let e = format!("{:#}", Config::load(&home).unwrap_err());
         assert!(e.contains("r:a") && e.contains("#ff88"), "{e}");
+    }
+
+    #[test]
+    fn the_default_is_a_shell_or_an_agent_harness_and_nothing_else() {
+        let (_t, home) = home();
+        std::fs::create_dir_all(home.path()).unwrap();
+        assert_eq!(Config::load(&home).unwrap().list.default, "shell");
+        for ok in ["shell", "claude", "codex", "antigravity"] {
+            std::fs::write(home.config_json(), format!(r#"{{"list": {{"default": "{ok}"}}}}"#)).unwrap();
+            assert_eq!(Config::load(&home).unwrap().list.default, ok);
+        }
+        for bad in ["sh", "nope", "generic", ""] {
+            std::fs::write(home.config_json(), format!(r#"{{"list": {{"default": "{bad}"}}}}"#)).unwrap();
+            let e = format!("{:#}", Config::load(&home).unwrap_err());
+            assert!(e.contains("list.default"), "{bad}: {e}");
+        }
+        std::fs::write(home.config_json(), r#"{"list": {"default": 1}}"#).unwrap();
+        assert!(Config::load(&home).is_err(), "a name, not a number");
     }
 
     #[test]

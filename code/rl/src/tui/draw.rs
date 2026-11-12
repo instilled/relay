@@ -5,7 +5,7 @@
 //! on either theme (see `theme`). Nothing on screen is an id.
 
 use super::app::{App, Mode};
-use super::{help, mark, theme};
+use super::{cmdline, help, mark, theme};
 use crate::config::Grouping;
 use crate::git::checkout_words;
 use crate::query;
@@ -293,13 +293,19 @@ pub struct Areas {
     pub footer: Rect,
 }
 
-pub fn areas(area: Rect, foot_h: u16) -> Areas {
+/// The most rows the command line stands on; a line typed with more scrolls
+/// within them.
+pub const LINE_MOST: usize = 5;
+
+/// `line_h` rows for the command line (`App::line_h`), `foot_h` for the
+/// footer.
+pub fn areas(area: Rect, line_h: u16, foot_h: u16) -> Areas {
     let [head, sep_a, list, sep_b, line, sep_c, footer] = Layout::vertical([
         Constraint::Length(head_h(area)),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(line_h.max(1)),
         Constraint::Length(1),
         Constraint::Length(foot_h.max(1)),
     ])
@@ -323,6 +329,18 @@ pub fn head_h(area: Rect) -> u16 {
     }
 }
 
+/// A row `width` wide: `left`, cut to leave room for `right` (in the accent)
+/// at its right end.
+fn with_right(left: Vec<Span<'static>>, right: Option<String>, width: usize) -> Line<'static> {
+    let right: Vec<Span<'static>> = right.map(|r| Span::styled(r, theme::accent())).into_iter().collect();
+    let rw: usize = right.iter().map(Span::width).sum::<usize>() + 1;
+    let mut left = cap_spans(left, width.saturating_sub(rw + 1));
+    let lw: usize = left.iter().map(Span::width).sum();
+    left.push(Span::raw(" ".repeat(width.saturating_sub(lw + rw))));
+    left.extend(right);
+    Line::from(left)
+}
+
 /// The headline's words, styled: the lead word in the accent, the tally plain.
 fn headline_spans(title: &str) -> Vec<Span<'static>> {
     let (lead, rest) = match title.split_once(" · ") {
@@ -342,7 +360,7 @@ fn headline_spans(title: &str) -> Vec<Span<'static>> {
 impl App {
     pub fn draw(&self, f: &mut Frame) {
         let foot = self.foot_lines(f.area().width);
-        let a = areas(f.area(), foot.len() as u16);
+        let a = areas(f.area(), self.line_h(), foot.len() as u16);
         let lines = self.lines();
         let title = rows::headline(&lines, &self.filter);
         self.draw_head(f, a.head, &title);
@@ -350,7 +368,7 @@ impl App {
             f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         }
         self.draw_list(f, a.list, &lines);
-        f.render_widget(Paragraph::new(self.bottom_line(a.line.width)), a.line);
+        f.render_widget(Paragraph::new(self.bottom_lines(a.line.width)), a.line);
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
             width: a.footer.width.saturating_sub(TEXT_INDENT),
@@ -424,10 +442,10 @@ impl App {
         );
     }
 
-    /// The toggles, for the header: a glyph and, with `keys`, its key for
-    /// each kind, `✦ ctrl+a` agents, `❯ ctrl+l` shells, then `◌ ctrl+o`
-    /// hidden and the grouping, each set apart. On is accented and bold, off
-    /// is quiet.
+    /// The toggles, for the header: a glyph and, with room (`keys`), what it
+    /// is — `✦ agents`, `❯ shells`, then `◌ hidden` and the grouping, each set
+    /// apart. The keys (ctrl+a, ctrl+l, ctrl+o, ctrl+s) are in the help grid.
+    /// On is accented and bold, off is quiet.
     fn toggle_spans(&self, keys: bool) -> Vec<Span<'static>> {
         let on = theme::accent().add_modifier(Modifier::BOLD);
         let off = theme::dim();
@@ -444,78 +462,105 @@ impl App {
                 icon.to_string()
             }
         };
-        let mut v = vec![
-            Span::styled(k("✦", "ctrl+a"), lit(p.show_agents)),
+        vec![
+            Span::styled(k("✦", "agents"), lit(p.show_agents)),
             Span::styled("  ", off),
-            Span::styled(k("❯", "ctrl+l"), lit(p.show_shells)),
+            Span::styled(k("❯", "shells"), lit(p.show_shells)),
             // Hidden is a different axis — what you hid, not a kind — and the
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
-            Span::styled(k("◌", "ctrl+o"), lit(p.show_hidden)),
+            Span::styled(k("◌", "hidden"), lit(p.show_hidden)),
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
-        ];
-        if keys {
-            v.push(Span::styled(" ctrl+s", off));
-        }
-        v
+        ]
     }
 
-    /// The line over the footer: the command line, with at its right what
-    /// it would start; or, while one is open, the search in its place.
-    fn bottom_line(&self, width: u16) -> Line<'static> {
-        let mut right = Vec::new();
-        if self.search.is_none()
-            && let Some(d) = self.detected()
-        {
-            right.push(Span::styled(d.label(), theme::accent()));
+    /// How many rows the command line stands on: one for each line typed
+    /// (`shift+enter`), up to `LINE_MOST`; one for the search.
+    pub fn line_h(&self) -> u16 {
+        if self.search.is_some() {
+            return 1;
         }
-        let mut left = match &self.search {
-            Some(s) => {
-                let mut spans = vec![Span::raw(" "), Span::styled("⌕ ", theme::accent())];
-                spans.extend(theme::with_caret(s.line.text(), s.line.cursor(), Style::default()));
-                if s.line.is_empty() {
-                    spans.push(Span::styled(" words · in: is: kind: on:", theme::dim()));
-                }
-                spans
-            }
-            None => self.command_spans(),
-        };
+        self.cmd.line.text().split('\n').count().clamp(1, LINE_MOST) as u16
+    }
+
+    /// The rows over the footer: the command line, with at the right of its
+    /// first row what it would start; or, while one is open, the search in
+    /// its place.
+    fn bottom_lines(&self, width: u16) -> Vec<Line<'static>> {
         let width = width as usize;
-        let rw: usize = right.iter().map(Span::width).sum::<usize>() + 1;
-        let left_room = width.saturating_sub(rw + 1);
-        left = cap_spans(left, left_room);
-        let lw: usize = left.iter().map(Span::width).sum();
-        left.push(Span::raw(" ".repeat(width.saturating_sub(lw + rw))));
-        left.extend(right);
-        Line::from(left)
+        let Some(s) = &self.search else {
+            let label = self.detected().map(|d| d.label());
+            return self
+                .command_rows()
+                .into_iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let right = label.clone().filter(|_| i == 0);
+                    with_right(row, right, width)
+                })
+                .collect();
+        };
+        let mut spans = vec![Span::raw(" "), Span::styled("⌕ ", theme::accent())];
+        spans.extend(theme::with_caret(s.line.text(), s.line.cursor(), Style::default()));
+        if s.line.is_empty() {
+            spans.push(Span::styled(" words · in: is: kind: on:", theme::dim()));
+        }
+        vec![with_right(spans, None, width)]
     }
 
-    /// The command line: the prompt, then what is
-    /// typed, the caret, and the best completion dim after it. Empty, it
-    /// says what it is for, or the filter in force.
-    fn command_spans(&self) -> Vec<Span<'static>> {
-        let mut spans = vec![Span::raw(" "), Span::styled("❯ ", theme::accent())];
+    /// The command line's rows: the prompt, then what is typed, the caret,
+    /// and the best completion dim after it — a row for each line typed,
+    /// the prompt on the first only (`⋮` where lines above are out of
+    /// sight: past `LINE_MOST` the rows follow the cursor). Empty, it says
+    /// what it is for, or the filter in force.
+    fn command_rows(&self) -> Vec<Vec<Span<'static>>> {
         let l = &self.cmd.line;
-        match self.cmd.ghost.as_deref() {
-            Some(g) if l.cursor() == l.text().len() && !g.is_empty() => {
-                let mut chars = g.chars();
-                let first = chars.next().map(String::from).unwrap_or_default();
-                spans.push(Span::raw(l.text().to_string()));
-                spans.push(Span::styled(first, theme::dim().add_modifier(Modifier::REVERSED)));
-                spans.push(Span::styled(chars.as_str().to_string(), theme::dim()));
+        let (text, cur) = (l.text(), l.cursor());
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let at = starts.iter().rposition(|&s| s <= cur).unwrap_or(0);
+        let top = (at + 1).saturating_sub(LINE_MOST);
+        let mut out = Vec::new();
+        for (i, &from) in starts.iter().enumerate().skip(top).take(LINE_MOST) {
+            let to = starts.get(i + 1).map_or(text.len(), |&n| n - 1);
+            let seg = &text[from..to];
+            let mut spans = match i {
+                0 => vec![Span::raw(" "), Span::styled("❯ ", theme::accent())],
+                _ if i == top => vec![Span::styled(" ⋮ ", theme::dim())],
+                _ => vec![Span::raw("   ")],
+            };
+            if i != at {
+                spans.push(Span::raw(seg.to_string()));
+            } else {
+                match self.cmd.ghost.as_deref() {
+                    Some(g) if cur == text.len() && !g.is_empty() => {
+                        let mut chars = g.chars();
+                        let first = chars.next().map(String::from).unwrap_or_default();
+                        spans.push(Span::raw(seg.to_string()));
+                        spans.push(Span::styled(first, theme::dim().add_modifier(Modifier::REVERSED)));
+                        spans.push(Span::styled(chars.as_str().to_string(), theme::dim()));
+                    }
+                    _ => spans.extend(theme::with_caret(seg, cur - from, Style::default())),
+                }
             }
-            _ => spans.extend(theme::with_caret(l.text(), l.cursor(), Style::default())),
+            out.push(spans);
         }
         if l.is_empty() {
-            let hint = if self.filter.is_empty() {
-                " a command, or claude/codex/agy and a prompt · / for commands · ctrl+f to find".to_string()
-            } else {
+            let hint = if !self.filter.is_empty() {
                 format!(" ⌕ {} · esc clears", self.filter)
+            } else if cmdline::default_agent(rows::registry(), &self.prefs().default).is_some() {
+                format!(
+                    " a prompt for {}, or claude/codex/agy and a prompt, ! for a shell · / for commands",
+                    self.prefs().default
+                )
+            } else {
+                " a command, or claude/codex/agy and a prompt · / for commands · ctrl+f to find".to_string()
             };
-            spans.push(Span::styled(hint, theme::dim()));
+            out[0].push(Span::styled(hint, theme::dim()));
         }
-        spans
+        out
     }
 
     /// The footer's rows at this width: the grid of keys where it is up,
@@ -563,7 +608,8 @@ impl App {
             return "enter runs it on the row · tab completes · ↑↓ picks the row · esc clears".into();
         }
         if !self.cmd.is_empty() {
-            return "enter starts · tab completes · ↑↓ picks the row, and so the folder · esc clears".into();
+            return "enter starts · shift+enter adds a line · tab completes · ↑↓ picks the row, and so the folder · esc clears"
+                .into();
         }
         if let Some(why) = self.native_failing() {
             return why;
@@ -583,6 +629,9 @@ impl App {
         }
         hints.push(help::hint(help::Id::Group, Some(by)));
         if let Some(n) = self.setup_notice() {
+            hints.insert(0, n);
+        }
+        if let Some(n) = self.drift_notice() {
             hints.insert(0, n);
         }
         help::footer(&hints, width)
@@ -873,9 +922,9 @@ mod tests {
         assert_eq!(head_h(screen(79, 45)), 1);
         // The list starts under the header and its separator, whichever it is,
         // and the command line stands between it and the footer.
-        let a = areas(screen(100, 30), 1);
+        let a = areas(screen(100, 30), 1, 1);
         assert_eq!((a.list.y, a.line.y, a.footer.y), (7, 27, 29));
-        let a = areas(screen(80, 20), 1);
+        let a = areas(screen(80, 20), 1, 1);
         assert_eq!((a.list.y, a.line.y, a.footer.y), (2, 17, 19));
     }
 

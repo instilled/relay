@@ -159,13 +159,27 @@ the cursor (else where `rl` was started; the line shows only the prompt `❯`):
   its own background (`claude --bg`), Codex on its own app-server daemon (see Codex below); the
   others in a session Relay holds.
 - `/` and a name: a command, run on the row under the cursor or on the list (below).
-- Anything else is a shell command, run in a shell Relay holds, which stays a shell once it is done.
+- `!` and a command (`! make test`): a shell command, whatever the default.
+- Anything else starts the default, `list.default` in `config.json`: `shell` (as it comes) runs it
+  as a shell command, in a shell Relay holds, which stays a shell once it is done; an agent harness
+  (`/default claude`) starts that agent with the whole line as its first prompt, so `fix the login`
+  is a prompt for Claude while `codex fix the login` still starts Codex.
+
+`shift+enter` adds a line to what is typed: a prompt of several lines goes to the agent whole, its
+newlines kept, and a shell runs the lines in order, as a script. `alt+enter` (option+enter) does
+the same, for terminals that send `shift+enter` as a plain `enter` (Relay asks the terminal to tell
+them apart with the kitty keyboard protocol, where the terminal speaks it — kitty, WezTerm,
+Ghostty and others; not Terminal.app or an older tmux). A paste keeps its newlines too, and starts nothing until
+`enter`. The line grows to five rows, then scrolls; `↑` `↓` move between its lines, and from its
+first or last line move on the list as ever.
 
 The right end of the line says which it is (`agent · claude`, `shell`, `command · pin`, `unknown
 command`, or `agent · antigravity (agy not found)`, which will not start). `tab` completes a
-harness, a program on `PATH`, or a path, and on a `/` line the command, then its colour or, for
-`/rename`, the row's name; the best completion stands dim after the cursor, and `tab` again cycles.
-Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `ctrl+f` searches.
+harness, a program on `PATH` (only after a `!` where the default is an agent), or a path, and on a
+`/` line the command, then its colour or, for `/rename`, the row's name, or for `/default` a
+harness that is here or `shell`; the best completion stands dim after the cursor, and `tab` again
+cycles. Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `ctrl+f`
+searches.
 
 | command | does |
 | --- | --- |
@@ -177,7 +191,9 @@ Every letter types; the list's own keys are ctrl keys, the arrows and `enter`. `
 | `/rm` | remove an ended session Relay holds; on a Claude or Codex session, ask to remove or archive it (`enter` confirms, `esc` cancels) |
 | `/agents` `/shells` `/hidden` | show agents, shells, hidden, as `ctrl+a` `ctrl+l` `ctrl+o` |
 | `/group` | by project or by state, as `ctrl+s` |
+| `/default <harness\|shell>` | what a line that names no harness starts: `shell`, or an agent harness (`claude`, `codex`, `agy`…) that takes the whole line as its prompt; kept in `config.json` as `list.default` |
 | `/setup` | the setup walk (as `rl setup`), under the list; back on the list, what it did stands in the footer, and the `setup needed` notice goes |
+| `/report` | report a harness that changed under Relay (see [When a harness changes](#when-a-harness-changes)), under the list as `/setup` is; `/report dismiss` dismisses it, posting nothing |
 | `/help` | the keys |
 | `/quit` | quit |
 
@@ -187,6 +203,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | key | does |
 | --- | --- |
 | `enter` | attach (on a line with text: start it) |
+| `shift+enter` `alt+enter` | a new line in what is typed |
 | typing | the command line; `esc` clears it, `home` `end` go to its ends |
 | `↑↓` `ctrl+j` `ctrl+k` | move |
 | `pgup` `pgdn` `home` `end` | page (`home` `end` with nothing typed) |
@@ -197,7 +214,7 @@ in the footer and changes nothing; an unknown one stays on the line to mend.
 | `ctrl+t` | pin |
 | `ctrl+g` | your colour for the row: none, red, blue, green, yellow, purple, orange, pink, cyan (a colour the harness set wins on screen; a `#rrggbb` set in `config.json` or by `rl color` goes to red) |
 | `shift+↑↓` | reorder |
-| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden (the header shows which: `✦ ctrl+a  ❯ ctrl+l  │  ◌ ctrl+o`, icons alone on a narrow one-line header) |
+| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden (the header shows which, by name: `✦ agents  ❯ shells  │  ◌ hidden  │  by project`, icons alone on a narrow one-line header) |
 | `ctrl+s` | group by project or by state (the header says which) |
 | `ctrl+c ctrl+c` | quit |
 | `ctrl+h` `f1` | the keys, as a grid; again or `esc` closes it |
@@ -251,6 +268,8 @@ rl rm <name>                    # remove one that is not running
 rl color <session> <name|#rrggbb|none>  # your colour for a row (a held name, or n:claude:<id> / o:claude:<id>)
 rl mcp --harness H              # serve send, who and inbox over stdio (agents call this)
 rl setup [--yes | --remove | --check] [--harness H]   # a walk on a terminal; plain otherwise
+rl report [--dry-run | --dismiss]  # report a harness that changed under Relay, only on your yes
+rl doctor                       # the harnesses found, their versions, and every drift noticed
 ```
 
 `rl ls` prints one row per session the list shows, with the same dedupe: the sessions Relay holds
@@ -276,10 +295,11 @@ terminal or the laptop lid costs nothing. Without a daemon, nothing else is runn
 | `sessions/<name>/` | one held session: `meta.json`, `state.json`, `hook.json`, `exit`, `sock` |
 | `state/<agent>/<session_id>.json` | what an agent's hooks said of a session Relay does not hold |
 | `mail/<key>/` | messages waiting for an agent, one file each (key: a held session's name, else its conversation id) |
-| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, colours, order, hidden) |
+| `config.json` | harnesses offered, badges, how the list stands (grouping, pins, names, colours, order, hidden, `default`: what a typed line starts) |
 | `hooks/` | settings files `rl new` passes to a harness (Claude's `--settings`) |
 | `detect/*.yaml` | your harness profiles |
 | `plugins/gh-pr` | the badge script for project headers |
+| `drift/` | what changed in a harness under Relay (`events.json`), and the versions and Codex schema checks it keeps per binary |
 
 A socket too long for the OS limit goes under `$TMPDIR/rl-<uid>-<hash>/`.
 
@@ -288,6 +308,12 @@ A socket too long for the OS limit goes under `$TMPDIR/rl-<uid>-<hash>/`.
 A harness is a file, `detect/<name>.yaml`. The built-in ones are compiled in (`antigravity`,
 `claude`, `codex`, `cursor`, `gemini`, `opencode`, `sh`, with `generic` as the floor under all). Yours in
 `~/.relay/detect/` merge over them field by field; a new name adds a harness.
+
+A profile covers a harness that works the way one Relay already knows does: run in a session
+Relay holds, hooks in a dialect Relay reads, MCP registered in one of the styles Relay writes, its
+own sessions listed in Claude's or Codex's format, renamed and woken by a typed line or a resumed
+run. A harness with a session protocol of its own (as Codex's app-server is) needs an adapter in
+`rl-detect`, which is code.
 
 Keys a profile accepts:
 
@@ -363,6 +389,33 @@ Your address is found in this order: `RL_SESSION`, when the held session runs th
 server was started for (`RL_SESSION_AGENT`, so an agent started in a held shell is not the shell),
 else (Claude) `CLAUDE_CODE_SESSION_ID` matched against the list, else you pass `from` or `as`
 yourself. Codex has no automatic address yet, so it passes them.
+
+## When a harness changes
+
+Relay depends on details of Claude and Codex that any update can change: the shape of `claude
+agents --json`, the id `claude --bg` prints, the methods and fields of Codex's app-server, the
+subcommands Relay runs (`claude rm`, `claude stop`, `codex archive`, `codex queue`). When one of them
+stops being what Relay expects, it notices at that moment and says so instead of failing vaguely:
+
+- `claude agents --json` is read tolerantly: fields it adds are let be; an entry without what Relay
+  needs (`kind`, and in the background `id`, `sessionId`, `cwd`, `state`) is left off the list.
+  Sessions in other terminals still show, by their hooks.
+- Codex is checked once per version (`codex app-server generate-json-schema`) against every method
+  and field Relay uses. One that is gone turns off only what needs it: without `thread/name/set` a
+  rename stays in Relay, without `turn/interrupt` `/stop` says it can't. A method the daemon answers
+  with "method not found" or "invalid params" is noticed too.
+- `claude --bg` that prints no session id, and a subcommand Relay runs that the harness rejects as
+  a usage error.
+
+The footer then leads with it — `codex 0.170.0: thread/name/set gone, rename stays in Relay ·
+/report` — and so does `rl setup --check`, under `drift:`. `/report` (or `rl report`) shows the
+GitHub issue it would post on instilled/relay — what Relay expected, what happened, the Relay,
+harness and OS versions, the check's id and how often it was seen — and asks `Post this as an issue
+on instilled/relay? [y/N]`. Nothing is sent without your yes. With `gh` logged in, it posts the
+issue (or, where an open issue reports the same check and version, adds a comment with the count);
+without it, it prints a prefilled link for you to open. `rl report --dry-run` only shows it;
+`/report dismiss` or `rl report --dismiss` drops it. No conversation content is ever kept: at most a
+structural line (field names, an error's words with paths as `~/<project>` and quoted text dropped).
 
 ## Known limits
 

@@ -1,0 +1,315 @@
+{
+ "definitions": {
+  "InitializeParams": {
+   "properties": {
+    "capabilities": {},
+    "clientInfo": {}
+   },
+   "required": [
+    "clientInfo"
+   ],
+   "type": "object"
+  },
+  "ThreadListParams": {
+   "properties": {
+    "archived": {},
+    "cursor": {},
+    "cwd": {},
+    "excludedThreadIds": {},
+    "limit": {},
+    "modelProviders": {},
+    "originators": {},
+    "searchTerm": {},
+    "sectionId": {},
+    "sortDirection": {},
+    "sortKey": {},
+    "sourceKinds": {},
+    "useStateDbOnly": {}
+   },
+   "type": "object"
+  },
+  "ThreadLoadedListParams": {
+   "properties": {
+    "cursor": {},
+    "limit": {}
+   },
+   "type": "object"
+  },
+  "ThreadReadParams": {
+   "properties": {
+    "includeTurns": {},
+    "threadId": {}
+   },
+   "required": [
+    "threadId"
+   ],
+   "type": "object"
+  },
+  "ThreadSetNameParams": {
+   "properties": {
+    "name": {},
+    "threadId": {}
+   },
+   "required": [
+    "name",
+    "threadId"
+   ],
+   "type": "object"
+  },
+  "ThreadStartParams": {
+   "properties": {
+    "approvalPolicy": {},
+    "approvalsReviewer": {},
+    "baseInstructions": {},
+    "config": {},
+    "cwd": {},
+    "developerInstructions": {},
+    "ephemeral": {},
+    "model": {},
+    "modelProvider": {},
+    "personality": {},
+    "sandbox": {},
+    "serviceName": {},
+    "serviceTier": {},
+    "sessionStartSource": {},
+    "threadSource": {}
+   },
+   "type": "object"
+  },
+  "TurnInterruptParams": {
+   "properties": {
+    "threadId": {},
+    "turnId": {}
+   },
+   "required": [
+    "threadId",
+    "turnId"
+   ],
+   "type": "object"
+  },
+  "TurnStartParams": {
+   "properties": {
+    "approvalPolicy": {},
+    "approvalsReviewer": {},
+    "clientUserMessageId": {},
+    "cwd": {},
+    "disabledPluginIds": {},
+    "effort": {},
+    "input": {},
+    "model": {},
+    "outputSchema": {},
+    "parentTurnId": {},
+    "personality": {},
+    "rootTurnId": {},
+    "sandboxPolicy": {},
+    "serviceTier": {},
+    "serviceTierForTurn": {},
+    "summary": {},
+    "threadId": {},
+    "toolOutput": {},
+    "turnTrigger": {}
+   },
+   "required": [
+    "input",
+    "threadId"
+   ],
+   "type": "object"
+  }
+ },
+ "oneOf": [
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "initialize"
+     ],
+     "title": "InitializeRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/InitializeParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "InitializeRequest",
+   "type": "object"
+  },
+  {
+   "description": "NEW APIs",
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "thread/start"
+     ],
+     "title": "Thread/startRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ThreadStartParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Thread/startRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "thread/name/set"
+     ],
+     "title": "Thread/name/setRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ThreadSetNameParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Thread/name/setRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "thread/list"
+     ],
+     "title": "Thread/listRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ThreadListParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Thread/listRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "thread/loaded/list"
+     ],
+     "title": "Thread/loaded/listRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ThreadLoadedListParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Thread/loaded/listRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "thread/read"
+     ],
+     "title": "Thread/readRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/ThreadReadParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Thread/readRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "turn/start"
+     ],
+     "title": "Turn/startRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/TurnStartParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Turn/startRequest",
+   "type": "object"
+  },
+  {
+   "properties": {
+    "id": {
+     "$ref": "#/definitions/RequestId"
+    },
+    "method": {
+     "enum": [
+      "turn/interrupt"
+     ],
+     "title": "Turn/interruptRequestMethod",
+     "type": "string"
+    },
+    "params": {
+     "$ref": "#/definitions/TurnInterruptParams"
+    }
+   },
+   "required": [
+    "id",
+    "method",
+    "params"
+   ],
+   "title": "Turn/interruptRequest",
+   "type": "object"
+  }
+ ],
+ "title": "ClientRequest"
+}
