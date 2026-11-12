@@ -30,6 +30,7 @@ use rl_detect::harness::{self, Harness, Woke};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Newest first: what an unknown client version is answered with.
@@ -38,6 +39,10 @@ const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// How long a ping may take: `codex queue` queues and resumes the thread on
 /// Codex's daemon.
 pub const PING_WAIT: Duration = Duration::from_secs(10);
+
+/// How long `who`, and a `send` or `inbox` that must find an address, wait
+/// for the harnesses' listings, all asked at once: one slower is left out.
+pub const LIST_WAIT: Duration = Duration::from_secs(5);
 
 /// Finds a harness by its name: what pings one of its sessions, and what
 /// advises waking one.
@@ -98,7 +103,8 @@ impl Entry {
 
 pub struct Server {
     home: Home,
-    listers: Vec<Box<dyn NativeLister>>,
+    listers: Vec<Arc<dyn NativeLister>>,
+    list_wait: Duration,
     caller: Caller,
     harnesses: Harnesses,
 }
@@ -121,10 +127,17 @@ impl Server {
     pub fn new(home: Home, listers: Vec<Box<dyn NativeLister>>, caller: Caller) -> Self {
         Self {
             home,
-            listers,
+            listers: listers.into_iter().map(Arc::from).collect(),
+            list_wait: LIST_WAIT,
             caller,
             harnesses: Box::new(|_| None),
         }
+    }
+
+    /// The same, waiting `wait` for the harnesses' listings.
+    pub fn with_list_wait(mut self, wait: Duration) -> Self {
+        self.list_wait = wait;
+        self
     }
 
     /// The same, pinging a recipient through its harness as `harnesses`
@@ -204,21 +217,18 @@ impl Server {
         (reply, claimed)
     }
 
-    /// Every session on the list, one shot: the harnesses are asked once, each
-    /// with its own timeout, and one that fails is left out.
-    fn entries(&self, held: Vec<Held>) -> Vec<Entry> {
+    /// Every session on the list, one shot, and a note for each harness
+    /// left out: the harnesses are asked at once, for `list_wait` (each
+    /// with its own timeout too), and one that fails or is slower is left
+    /// out.
+    fn entries(&self, held: Vec<Held>) -> (Vec<Entry>, Vec<String>) {
         let hooked = state::list(&self.home, Timestamp::now());
-        let mut native = Vec::new();
-        let mut answered = BTreeSet::new();
-        for l in &self.listers {
-            match l.list() {
-                Ok(rows) => {
-                    answered.insert(l.harness().to_string());
-                    native.extend(rows);
-                }
-                Err(e) => eprintln!("rl mcp: {} did not list: {e:#}", l.harness()),
-            }
-        }
+        let mut notes = Vec::new();
+        let listed = sources::list_all(self.listers.iter().cloned(), self.list_wait, &mut |w| {
+            eprintln!("rl mcp: {w}");
+            notes.push(w);
+        });
+        let (native, answered) = (listed.rows, listed.answered);
         // Each row's mail key, conversation ids, ping id and native row, by
         // row key.
         type Ids = (String, Vec<String>, Option<String>, Option<NativeRow>);
@@ -256,7 +266,8 @@ impl Server {
                 Source::Native => last(r),
             })
             .collect();
-        rows.into_iter()
+        let entries = rows
+            .into_iter()
             .zip(addresses)
             .map(|(row, address)| {
                 // One its hooks told of: its id is its conversation's.
@@ -273,7 +284,8 @@ impl Server {
                     native,
                 }
             })
-            .collect()
+            .collect();
+        (entries, notes)
     }
 
     /// The caller's own entry, if its environment tells.
@@ -304,9 +316,10 @@ impl Server {
     }
 
     fn who(&self) -> String {
-        let entries = self.entries(sessions::list(&self.home));
+        let (entries, notes) = self.entries(sessions::list(&self.home));
+        let notes: String = notes.iter().map(|n| format!("\n({n})")).collect();
         if entries.is_empty() {
-            return "no sessions".into();
+            return format!("no sessions{notes}");
         }
         let me = self.me(&entries).map(|e| e.row.key.as_str());
         entries
@@ -331,6 +344,7 @@ impl Server {
             })
             .collect::<Vec<_>>()
             .join("\n")
+            + &notes
     }
 
     fn send(&self, args: &Value) -> Result<String, String> {
@@ -347,8 +361,11 @@ impl Server {
             };
             (to.to_string(), to.to_string(), self.me_cheaply(&held), recipient)
         } else {
-            let entries = self.entries(held);
-            let e = resolve(&entries, to)?;
+            let (entries, notes) = self.entries(held);
+            let e = resolve(&entries, to).map_err(|e| {
+                let notes: String = notes.iter().map(|n| format!("\n({n})")).collect();
+                format!("{e}{notes}")
+            })?;
             let me = (self.caller.relay_session.clone()).or_else(|| self.me(&entries).map(|e| e.address.clone()));
             let recipient = Recipient {
                 harness: e.row.harness.clone(),
@@ -424,7 +441,7 @@ impl Server {
             // Held: its name, and the ids it has had; no harness is asked.
             Some(_) => own_keys(&self.home, &self.caller),
             None => {
-                let entries = self.entries(sessions::list(&self.home));
+                let (entries, _) = self.entries(sessions::list(&self.home));
                 match self.me(&entries) {
                     Some(e) => e.keys(),
                     None => {
@@ -1209,6 +1226,62 @@ mod tests {
         assert!(got.contains("from sess-aaaa"), "{got}");
         assert_eq!(asked.load(Ordering::SeqCst), 0);
         assert!(folders(&f.home).is_empty());
+    }
+
+    /// A lister that takes `slow` to say `rows`.
+    struct Slow {
+        harness: &'static str,
+        rows: Vec<NativeRow>,
+        slow: Duration,
+    }
+
+    impl NativeLister for Slow {
+        fn harness(&self) -> &str {
+            self.harness
+        }
+
+        fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
+            std::thread::sleep(self.slow);
+            Ok(self.rows.clone())
+        }
+    }
+
+    #[test]
+    fn who_answers_with_the_fast_harness_while_a_slow_one_is_still_listing() {
+        let f = fixture();
+        let fast: Box<dyn NativeLister> = Box::new(Slow {
+            harness: "claude",
+            rows: vec![native("0a1b", "conv-1", "quick")],
+            slow: Duration::ZERO,
+        });
+        let slow: Box<dyn NativeLister> = Box::new(Slow {
+            harness: "codex",
+            rows: vec![native_of("codex", "t-1", "t-1", "late")],
+            slow: Duration::from_secs(5),
+        });
+        let s =
+            Server::new(f.home.clone(), vec![slow, fast], Caller::default()).with_list_wait(Duration::from_millis(300));
+        let began = std::time::Instant::now();
+        let who = ok_text(&s, "who", json!({}));
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "bounded: {:?}",
+            began.elapsed()
+        );
+        assert!(who.lines().any(|l| l.starts_with("quick · claude")), "{who}");
+        assert!(!who.contains("late"), "{who}");
+        assert!(
+            who.contains("codex did not answer in 0.3s; its sessions are left out"),
+            "{who}"
+        );
+        // An address of the fast one resolves all the same.
+        ok_text(&s, "send", json!({ "to": "quick", "text": "x", "from": "me" }));
+        let r = drive(
+            &s,
+            &[call(1, "send", json!({ "to": "late", "text": "x", "from": "me" }))],
+        );
+        assert_eq!(r[0]["result"]["isError"], true);
+        assert!(text(&r[0]).contains("codex did not answer"), "{}", text(&r[0]));
     }
 
     #[test]
