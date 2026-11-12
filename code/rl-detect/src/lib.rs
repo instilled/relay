@@ -34,6 +34,7 @@ pub mod mcp_entry;
 pub mod registry;
 pub mod sessions;
 pub mod settings;
+pub mod setup;
 pub mod typing;
 pub mod user_hooks;
 

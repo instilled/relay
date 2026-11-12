@@ -259,9 +259,12 @@ impl App {
         let size = crossterm::terminal::size().unwrap_or(DEFAULT_SIZE);
         self.work.spawn(async move {
             let at = cwd.clone();
-            let started = tokio::task::spawn_blocking(move || a.start(&at, None, prompt.as_deref(), &before)).await;
+            let started = tokio::task::spawn_blocking(move || {
+                rl_detect::harness::Steps::start(a, &at, None, prompt.as_deref(), &before)
+            })
+            .await;
             match started {
-                Ok(Ok(Started::Id(id))) => Done {
+                Ok(Ok(Started::Background(id))) => Done {
                     select: Some(native_key(a, &id)),
                     ..Done::said(format!("started {what} {id} in its background · enter attaches"))
                 },
@@ -432,7 +435,7 @@ impl App {
                 };
                 self.say(format!("stopping {title}…"));
                 self.work.spawn(async move {
-                    let run = tokio::task::spawn_blocking(move || a.stop(&id, &cwd)).await;
+                    let run = tokio::task::spawn_blocking(move || rl_detect::harness::Steps::stop(a, &id, &cwd)).await;
                     match run {
                         Ok(Ok(_)) => Done {
                             ask_native: true,
@@ -456,7 +459,8 @@ impl App {
                 self.say(format!("removing {title}…"));
                 let (next, key) = (self.next_key(), native_key(a, &id));
                 self.work.spawn(async move {
-                    let run = tokio::task::spawn_blocking(move || a.remove(&id, &cwd)).await;
+                    let run =
+                        tokio::task::spawn_blocking(move || rl_detect::harness::Steps::remove(a, &id, &cwd)).await;
                     match run {
                         Ok(Ok(())) => Done {
                             select: next,
@@ -707,7 +711,8 @@ impl App {
         let (locks, key) = (self.home.typing_dir(), r.key);
         self.work.spawn(async move {
             let to = name.clone();
-            let run = tokio::task::spawn_blocking(move || a.rename(&row, &to, &locks)).await;
+            let run =
+                tokio::task::spawn_blocking(move || rl_detect::harness::Steps::rename(a, &row, &to, &locks)).await;
             match run {
                 Ok(Ok(())) => Done {
                     renamed: Some((key, name.clone())),

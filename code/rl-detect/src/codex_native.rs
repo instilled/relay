@@ -27,7 +27,10 @@
 //! turn (`turn/interrupt`); the thread stays. Removing one deletes it for
 //! good (`thread/delete`), its running turn interrupted first.
 
-use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Started};
+use crate::harness::{
+    self, Actions, Attach, CarryOn, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, RenameHow, Renamed,
+    Session, Start, Started, Steps, held,
+};
 use crate::mcp_entry::{How, Place};
 use crate::registry::Profile;
 use crate::sessions::{ID, Rename};
@@ -78,6 +81,7 @@ pub struct Codex {
     list: Vec<String>,
     /// The profile's `sessions.attach`: `{id}` is the thread's id.
     attach: Vec<String>,
+    info: Info,
 }
 
 impl Codex {
@@ -93,12 +97,14 @@ impl Codex {
             bin: bin.to_string_lossy().into_owned(),
             list: s.list.as_ref()?.args.clone(),
             attach: s.attach.clone(),
+            info: held::info(profile, &bin.to_string_lossy(), true),
         })
     }
 
     /// The same, its binary on this machine or not.
     pub fn found(mut self, found: bool) -> Codex {
         self.found = found;
+        self.info.found = found;
         self
     }
 
@@ -152,7 +158,7 @@ impl Codex {
     }
 }
 
-impl Harness for Codex {
+impl Steps for Codex {
     fn profile(&self) -> &Profile {
         &self.profile
     }
@@ -203,7 +209,7 @@ impl Harness for Codex {
             prompt.to_string(),
         );
         self.on_daemon(move |d| begin(d, &cwd, name.as_deref(), &prompt))
-            .map(Started::Id)
+            .map(Started::Background)
     }
 
     fn never_held(&self) -> bool {
@@ -258,6 +264,144 @@ impl Harness for Codex {
     /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
     fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
         harness::mcp_place(self, env, How::Toml)
+    }
+}
+
+impl Codex {
+    /// Whether `f` is on, as far as is known without running anything.
+    fn has(&self, f: Feature) -> bool {
+        self.compat_known().is_none_or(|c| c.off(f).is_none())
+    }
+}
+
+impl Harness for Codex {
+    fn info(&self) -> &Info {
+        &self.info
+    }
+
+    fn sessions(&self, wait: Duration) -> harness::Listed {
+        self.list_within(wait).into()
+    }
+
+    /// A prompt: a thread on the daemon, named where given, its first turn
+    /// started. None: its TUI, here. A conversation carried on: resumed
+    /// here, on the daemon. Never held: `words` are its prompt, and a flag
+    /// among them cannot go to the daemon.
+    fn start(&self, s: &Start) -> Result<Started> {
+        if let Some(id) = &s.resume {
+            return Ok(Started::Here(
+                self.attach_argv(id).context("its profile says no `sessions.attach`")?,
+            ));
+        }
+        let prompt = match &s.words {
+            Some(words) => {
+                if let Some(flag) = words.iter().find(|w| w.starts_with('-')) {
+                    bail!(
+                        "{} starts in its own background, where `{flag}` can't go: give it a prompt only",
+                        self.harness
+                    );
+                }
+                (!words.is_empty()).then(|| words.join(" "))
+            }
+            None => s.prompt.clone(),
+        };
+        let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
+            return Ok(Started::Here(vec![self.bin.clone()]));
+        };
+        self.needs(Feature::Start)?;
+        let (cwd, name) = (s.cwd.clone(), s.name.clone().filter(|n| !n.trim().is_empty()));
+        self.on_daemon(move |d| begin(d, &cwd, name.as_deref(), &prompt))
+            .map(Started::Background)
+    }
+
+    /// Its own thread: `codex resume <id>` opens it through the daemon. One
+    /// open elsewhere, at rest, is a thread on the daemon already: resumed
+    /// here the same way, never held.
+    fn attach(&self, s: &Session) -> Attach {
+        match s.owner {
+            Owner::Relay { .. } => held::attach(self, s),
+            Owner::Own => self.attach_argv(&s.id).map_or(Attach::No, Attach::Argv),
+            Owner::Elsewhere { .. } if s.state == RunState::Idle => {
+                self.attach_argv(&s.id).map_or(Attach::No, Attach::Argv)
+            }
+            Owner::Elsewhere { .. } => Attach::No,
+        }
+    }
+
+    /// A thread with a turn running stops (its turn interrupted); any
+    /// removes (`thread/delete`); a rename is a call on the daemon — each
+    /// where this Codex still has it.
+    fn actions(&self, s: &Session) -> Actions {
+        match s.owner {
+            Owner::Relay { .. } => held::actions(s),
+            Owner::Own => Actions {
+                stop: matches!(s.state, RunState::Working | RunState::NeedsInput) && self.has(Feature::Stop),
+                remove: self.has(Feature::Remove),
+                rename: if self.rename_method().is_some() && self.has(Feature::Rename) {
+                    RenameHow::Now
+                } else {
+                    RenameHow::RelayOnly
+                },
+            },
+            Owner::Elsewhere { .. } => Actions::NONE,
+        }
+    }
+
+    fn stop(&self, s: &Session) -> Result<()> {
+        match s.owner {
+            Owner::Own => Steps::stop(self, &s.id, &s.cwd),
+            _ => held::stop(s),
+        }
+    }
+
+    fn remove(&self, s: &Session) -> Result<()> {
+        match s.owner {
+            Owner::Own => Steps::remove(self, &s.id, &s.cwd),
+            _ => held::remove(s),
+        }
+    }
+
+    /// `thread/name/set` on its daemon: any thread of its own, any name,
+    /// an empty one too. Where this Codex no longer has it, or the call
+    /// fails, the name stays Relay's, and why is said.
+    fn rename(&self, s: &Session, name: &str) -> Renamed {
+        if s.owner != Owner::Own {
+            return Renamed::RelayOnly(None);
+        }
+        let set = || -> Result<()> {
+            self.needs(Feature::Rename)?;
+            let method = self.rename_method().context("its profile says no `sessions.rename`")?;
+            let (id, name) = (s.id.clone(), name.trim().to_string());
+            self.on_daemon(move |d| set_name(d, &method, &id, &name))
+        };
+        match set() {
+            Ok(()) => Renamed::Now,
+            Err(e) => Renamed::RelayOnly(Some(format!("{e:#}"))),
+        }
+    }
+
+    /// Queued on its thread, the thread resumed on the daemon (`codex
+    /// queue … --resume`).
+    fn notify(&self, s: &Session, mail: &Mail) -> Notified {
+        held::notify(self, s, mail)
+    }
+
+    /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
+    fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>> {
+        held::setup(self, env, How::Toml)
+    }
+
+    fn caller(&self, _: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        None
+    }
+
+    /// Its app-server's schema against what Relay uses (`compat`).
+    fn check(&self) -> harness::Compat {
+        let c = self.compat().unwrap_or_default();
+        harness::Compat {
+            version: c.version.clone().or_else(|| self.info.version()),
+            off: c.gone.iter().map(|g| (g.check(), g.words())).collect(),
+        }
     }
 }
 
@@ -1498,7 +1642,7 @@ mod tests {
             ["codex", "resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]
         );
         assert_eq!(
-            c.start(Path::new("/w"), None, None, &HashSet::new()).unwrap(),
+            Steps::start(&c, Path::new("/w"), None, None, &HashSet::new()).unwrap(),
             Started::Here(vec!["codex".into()]),
             "no prompt: its TUI, here"
         );
@@ -1722,7 +1866,7 @@ mod tests {
             color: None,
         };
         assert!(h.renames(&row, "y"), "not known yet: as ever");
-        let (e, noticed) = crate::drift::capture(|| h.rename(&row, "y", tmp.path()).unwrap_err());
+        let (e, noticed) = crate::drift::capture(|| Steps::rename(h.as_ref(), &row, "y", tmp.path()).unwrap_err());
         assert_eq!(
             e.to_string(),
             "codex 0.167.2: thread/name/set gone, rename stays in Relay"
@@ -1733,7 +1877,7 @@ mod tests {
         assert!(!h.renames(&row, "y"), "known now: the name stays in Relay");
         assert!(h.stops(&row), "the rest goes on");
         let ((), again) = crate::drift::capture(|| {
-            let _ = h.rename(&row, "y", tmp.path());
+            let _ = Steps::rename(h.as_ref(), &row, "y", tmp.path());
         });
         assert!(again.is_empty(), "checked once per binary");
     }

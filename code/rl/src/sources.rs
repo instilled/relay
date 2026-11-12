@@ -181,7 +181,7 @@ impl StandIn {
     fn begin(&self, argv: &[String], cwd: &std::path::Path, before: &HashSet<String>) -> anyhow::Result<String> {
         STARTED.lock().unwrap().push(cwd.to_path_buf());
         rl_detect::claude_native::begin(
-            |w| self.list_within(w),
+            |w| rl_detect::harness::Steps::list_within(self, w),
             argv,
             cwd,
             before,
@@ -191,7 +191,7 @@ impl StandIn {
 }
 
 #[cfg(test)]
-impl Harness for StandIn {
+impl rl_detect::harness::Steps for StandIn {
     fn profile(&self) -> &rl_detect::Profile {
         self.inner.profile()
     }
@@ -213,7 +213,7 @@ impl Harness for StandIn {
         Ok(started
             .iter()
             .map(|cwd| NativeRow {
-                harness: self.name().into(),
+                harness: rl_detect::harness::Steps::name(self).into(),
                 id: "0a1b2c3d".into(),
                 session_id: "s-0a1b2c3d".into(),
                 name: "started".into(),
@@ -240,8 +240,10 @@ impl Harness for StandIn {
         before: &HashSet<String>,
     ) -> anyhow::Result<rl_detect::harness::Started> {
         match self.claude.as_ref().and_then(|c| c.start_argv(name, prompt)) {
-            Some(argv) => self.begin(&argv, cwd, before).map(rl_detect::harness::Started::Id),
-            None => self.inner.start(cwd, name, prompt, before),
+            Some(argv) => self
+                .begin(&argv, cwd, before)
+                .map(rl_detect::harness::Started::Background),
+            None => rl_detect::harness::Steps::start(self.inner.as_ref(), cwd, name, prompt, before),
         }
     }
 
@@ -280,7 +282,7 @@ impl Harness for StandIn {
     }
 
     fn stop(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.stop(id, cwd)
+        rl_detect::harness::Steps::stop(self.inner.as_ref(), id, cwd)
     }
 
     fn removes(&self, row: &NativeRow) -> bool {
@@ -288,7 +290,7 @@ impl Harness for StandIn {
     }
 
     fn remove(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.remove(id, cwd)
+        rl_detect::harness::Steps::remove(self.inner.as_ref(), id, cwd)
     }
 
     fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
@@ -300,7 +302,7 @@ impl Harness for StandIn {
     }
 
     fn rename(&self, row: &NativeRow, name: &str, locks: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.rename(row, name, locks)
+        rl_detect::harness::Steps::rename(self.inner.as_ref(), row, name, locks)
     }
 
     fn wake(&self, row: &NativeRow, line: &str, locks: &std::path::Path) -> Option<rl_detect::harness::Woke> {
@@ -332,6 +334,69 @@ impl Harness for StandIn {
 
     fn wake_advice(&self, name: &str) -> Option<String> {
         self.inner.wake_advice(name)
+    }
+}
+
+#[cfg(test)]
+impl Harness for StandIn {
+    fn info(&self) -> &rl_detect::harness::Info {
+        self.inner.info()
+    }
+
+    fn sessions(&self, wait: std::time::Duration) -> rl_detect::harness::Listed {
+        rl_detect::harness::Steps::list_within(self, wait).into()
+    }
+
+    /// Claude's start, run on the stand-in and listed by it; the rest the
+    /// harness's own.
+    fn start(&self, s: &rl_detect::harness::Start) -> anyhow::Result<rl_detect::harness::Started> {
+        let argv = s.words.is_none().then(|| {
+            self.claude
+                .as_ref()
+                .and_then(|c| c.bg_argv(s.resume.as_deref(), s.name.as_deref(), s.prompt.as_deref()))
+        });
+        match argv.flatten() {
+            Some(argv) => self
+                .begin(&argv, &s.cwd, &HashSet::new())
+                .map(rl_detect::harness::Started::Background),
+            None => Harness::start(self.inner.as_ref(), s),
+        }
+    }
+
+    fn attach(&self, s: &rl_detect::harness::Session) -> rl_detect::harness::Attach {
+        self.inner.attach(s)
+    }
+
+    fn actions(&self, s: &rl_detect::harness::Session) -> rl_detect::harness::Actions {
+        self.inner.actions(s)
+    }
+
+    fn stop(&self, s: &rl_detect::harness::Session) -> anyhow::Result<()> {
+        Harness::stop(self.inner.as_ref(), s)
+    }
+
+    fn remove(&self, s: &rl_detect::harness::Session) -> anyhow::Result<()> {
+        Harness::remove(self.inner.as_ref(), s)
+    }
+
+    fn rename(&self, s: &rl_detect::harness::Session, name: &str) -> rl_detect::harness::Renamed {
+        Harness::rename(self.inner.as_ref(), s, name)
+    }
+
+    fn notify(&self, s: &rl_detect::harness::Session, mail: &rl_detect::harness::Mail) -> rl_detect::harness::Notified {
+        self.inner.notify(s, mail)
+    }
+
+    fn setup(&self, env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> anyhow::Result<Vec<rl_detect::setup::Part>> {
+        self.inner.setup(env)
+    }
+
+    fn caller(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        self.inner.caller(env)
+    }
+
+    fn check(&self) -> rl_detect::harness::Compat {
+        self.inner.check()
     }
 }
 

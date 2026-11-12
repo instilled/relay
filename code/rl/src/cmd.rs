@@ -74,9 +74,12 @@ async fn new_own(a: &'static dyn Harness, cwd: &Path, name_only: bool, words: &[
     let cwd = std::fs::canonicalize(cwd).with_context(|| format!("cwd {}", cwd.display()))?;
     let prompt = (!words.is_empty()).then(|| words.join(" "));
     let at = cwd.clone();
-    let started = tokio::task::spawn_blocking(move || a.start(&at, None, prompt.as_deref(), &HashSet::new())).await?;
+    let started = tokio::task::spawn_blocking(move || {
+        rl_detect::harness::Steps::start(a, &at, None, prompt.as_deref(), &HashSet::new())
+    })
+    .await?;
     match started {
-        Ok(Started::Id(id)) => {
+        Ok(Started::Background(id)) => {
             println!("{id}");
             if !name_only {
                 match a.attach_argv(&id) {
