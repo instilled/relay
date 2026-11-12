@@ -90,11 +90,6 @@ impl Home {
     pub fn mail_dir(&self) -> PathBuf {
         self.0.join("mail")
     }
-    /// The lock files of typing into a harness's own session, one per
-    /// session: held whole by a typer, shared by an attach from the list.
-    pub fn typing_dir(&self) -> PathBuf {
-        self.0.join("typing")
-    }
     /// Which of the harnesses' own sessions you are attached to from the
     /// list now: a file each, there while the attach lasts.
     pub fn attached_dir(&self) -> PathBuf {

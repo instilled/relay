@@ -151,10 +151,8 @@ impl Codex {
 
     /// The method its profile renames a thread by, where it is a call.
     fn rename_method(&self) -> Option<String> {
-        match self.profile.sessions.as_ref()?.rename.as_ref()? {
-            Rename::Rpc(m) => Some(m.clone()),
-            Rename::Type(_) => None,
-        }
+        let Rename::Rpc(m) = self.profile.sessions.as_ref()?.rename.as_ref()?;
+        Some(m.clone())
     }
 }
 
@@ -245,20 +243,6 @@ impl Steps for Codex {
         let stops = self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none());
         let id = id.to_string();
         self.on_daemon(move |d| delete(d, &id, stops))
-    }
-
-    /// The call its profile's `sessions.rename` names, on its daemon
-    /// (`thread/name/set`): any thread, any name, an empty one too.
-    /// Not where this Codex no longer has it: the name stays in Relay.
-    fn renames(&self, _: &NativeRow, _: &str) -> bool {
-        self.rename_method().is_some() && self.compat_known().is_none_or(|c| c.off(Feature::Rename).is_none())
-    }
-
-    fn rename_row(&self, row: &NativeRow, name: &str, _: &Path) -> Result<()> {
-        self.needs(Feature::Rename)?;
-        let method = self.rename_method().context("its profile says no `sessions.rename`")?;
-        let (id, name) = (row.id.clone(), name.trim().to_string());
-        self.on_daemon(move |d| set_name(d, &method, &id, &name))
     }
 
     /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
@@ -1865,20 +1849,25 @@ mod tests {
             pr: None,
             color: None,
         };
-        assert!(h.renames(&row, "y"), "not known yet: as ever");
-        let (e, noticed) = crate::drift::capture(|| Steps::rename_row(h.as_ref(), &row, "y", tmp.path()).unwrap_err());
+        let s = harness::Session::own(&row);
+        assert_eq!(h.actions(&s).rename, RenameHow::Now, "not known yet: as ever");
+        let (said, noticed) = crate::drift::capture(|| h.rename(&s, "y"));
         assert_eq!(
-            e.to_string(),
-            "codex 0.167.2: thread/name/set gone, rename stays in Relay"
+            said,
+            Renamed::RelayOnly(Some(
+                "codex 0.167.2: thread/name/set gone, rename stays in Relay".into()
+            ))
         );
         assert_eq!(noticed.len(), 1);
         assert_eq!(noticed[0].check, "codex.schema.thread/name/set");
         assert_eq!(noticed[0].bin.as_deref(), Some(bin.as_path()));
-        assert!(!h.renames(&row, "y"), "known now: the name stays in Relay");
-        assert!(h.stops(&row), "the rest goes on");
-        let ((), again) = crate::drift::capture(|| {
-            let _ = Steps::rename_row(h.as_ref(), &row, "y", tmp.path());
-        });
+        assert_eq!(
+            h.actions(&s).rename,
+            RenameHow::RelayOnly,
+            "known now: the name stays in Relay"
+        );
+        assert!(h.actions(&s).stop, "the rest goes on");
+        let (_, again) = crate::drift::capture(|| h.rename(&s, "y"));
         assert!(again.is_empty(), "checked once per binary");
     }
 

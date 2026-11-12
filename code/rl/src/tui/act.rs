@@ -35,10 +35,7 @@ fn hand_new(a: &dyn Harness, id: &str, cwd: &std::path::Path, title: String) -> 
     let name = &a.info().name;
     match a.attach(&Session::started(name, id, cwd)) {
         rl_detect::harness::Attach::Argv(argv) => Some(Hand {
-            to: To::Argv {
-                back: rl_detect::harness::Steps::agents_view(a).cloned(),
-                argv,
-            },
+            to: To::Argv { argv },
             title,
             key: native_key(name, id),
         }),
@@ -76,10 +73,7 @@ impl App {
                     Some(h) => To::Held(Box::new(h.meta)),
                 }
             }
-            Attach::Argv(argv) => To::Argv {
-                argv: argv.clone(),
-                back: rl_detect::harness::Steps::agents_view(sources::harness_of(&harness)).cloned(),
-            },
+            Attach::Argv(argv) => To::Argv { argv: argv.clone() },
             Attach::CarryOn(start) => {
                 let start = start.clone();
                 return self.carry_on(start, &harness, title);

@@ -77,32 +77,11 @@ sessions:
   # passes --discard-unpushed or --force-remove-worktree. Read off `claude rm
   # --help` 2.1.322.
   remove: [rm, "{id}"]
-  # Its agents view, as an attached session draws it (← on an empty prompt
-  # opens it there, whatever `leftArrowOpensAgents` says): the new-session
-  # prompt's placeholder, at the left edge — a transcript indents what it
-  # quotes. Relay's list is that view, so the attach lets go and the list
-  # comes back. Read off `claude agents` 2.1.322 in a pty, at 34 to 120
-  # columns (it wraps after `new` when narrow).
-  agents_view: ['^❯ describe a task for a new\b']
-  # A name you give one in Relay's list goes to Claude too, typed into it
-  # (Claude has no command that renames one from outside): only into one
-  # that is idle, that you are not attached to; else the name stays Relay's.
-  rename: { type: "/rename {name}" }
-  # Relay mail wakes one: an idle one has the mail's line typed into it; one
-  # that has stopped or ended is carried on in the background with that line
-  # as its prompt (`resume` above, then `start`); one working or waiting on
-  # you hears of it from its hooks, as before.
-  wake: { idle: type, stopped: resume_bg }
-  # What an attached session's screen shows of its input, for typing into it
-  # (at 120x40, through `attach`): its input line is `❯` and a no-break
-  # space at the left edge (a bare `❯` where the space is not kept), between
-  # two rules — the transcript quotes your prompts with a plain space — and
-  # a turn running has its spinner line (`✻ Puttering… (1s · ↓ 9 tokens)`;
-  # a turn done says `✻ Worked for 2s`, no ellipsis). Read off `claude
-  # attach` 2.1.322 in a pty.
-  typing:
-    input: '^❯(?:\x{a0}(.*))?$'
-    busy: ['^[·✢✳✶✻✽*] \S+…', '(?i)esc to interrupt']
+  # No rename from outside: a name you give one in Relay's list is Relay's
+  # till Relay next starts it or carries it on, which passes `name` above.
+  # Relay mail wakes one idle in its background by `stop`, then `resume`
+  # and `start` with the mail's line as the prompt; that is Claude's harness
+  # code, from these words.
 # Where Relay's MCP server goes (`rl setup`): Claude's own ~/.claude.json
 # ($CLAUDE_CONFIG_DIR/.claude.json with that set), written only through
 # `claude mcp add|remove --scope user`; Relay reads it to compare.
@@ -110,9 +89,10 @@ mcp:
   file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
 # What `rl setup` sets in Claude's global config, the same file: `←` on an
 # empty prompt opens Claude's agents view, and Relay's list is that view, so
-# it is turned off. Claude has no command that sets it (`claude config` is
-# gone), so Relay writes the key itself, the rest of the file kept; `--check`
-# says `check` while it is not so. `--remove` leaves it.
+# it is turned off: a plain key, as Relay reads no screen. Claude has no
+# command that sets it (`claude config` is gone), so Relay writes the key
+# itself, the rest of the file kept; `--check` says `check` while it is not
+# so. `--remove` leaves it.
 settings:
   file: ["$CLAUDE_CONFIG_DIR/.claude.json", "~/.claude.json"]
   set:

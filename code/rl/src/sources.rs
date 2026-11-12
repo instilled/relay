@@ -303,18 +303,6 @@ impl rl_detect::harness::Steps for StandIn {
         self.inner.ping_argv(id, text)
     }
 
-    fn renames(&self, row: &NativeRow, name: &str) -> bool {
-        self.inner.renames(row, name)
-    }
-
-    fn rename_row(&self, row: &NativeRow, name: &str, locks: &std::path::Path) -> anyhow::Result<()> {
-        rl_detect::harness::Steps::rename_row(self.inner.as_ref(), row, name, locks)
-    }
-
-    fn wake(&self, row: &NativeRow, line: &str, locks: &std::path::Path) -> Option<rl_detect::harness::Woke> {
-        self.inner.wake(row, line, locks)
-    }
-
     fn user_hooks(&self) -> Option<&rl_detect::sessions::UserHooks> {
         self.inner.user_hooks()
     }
@@ -336,10 +324,6 @@ impl rl_detect::harness::Steps for StandIn {
 
     fn mail_by_hooks(&self) -> bool {
         self.inner.mail_by_hooks()
-    }
-
-    fn wake_advice(&self, name: &str) -> Option<String> {
-        self.inner.wake_advice(name)
     }
 }
 

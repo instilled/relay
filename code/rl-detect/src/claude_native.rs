@@ -237,14 +237,6 @@ impl Steps for Claude {
     fn mail_by_hooks(&self) -> bool {
         true
     }
-
-    /// `claude agents` lists its background sessions by the name `name`,
-    /// which Claude's `SendMessage` addresses.
-    fn wake_advice(&self, name: &str) -> Option<String> {
-        Some(format!(
-            "{name} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."
-        ))
-    }
 }
 
 /// What Claude says of one that is busy, or waits on you: its hooks tell it.

@@ -23,7 +23,7 @@
 use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
-use crate::sessions::{ID, NAME, Rename, ScreenMark, TEXT, UserHooks};
+use crate::sessions::{ID, TEXT, UserHooks};
 use crate::settings;
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
@@ -114,21 +114,6 @@ pub enum CarryOn {
     Attach(Vec<String>),
 }
 
-/// What came of waking one of a harness's sessions for relay mail
-/// (`Harness::wake`), in words for `send` to say.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Woke {
-    /// The mail's line was typed into it, idle.
-    Typed,
-    /// It had stopped: it carries on in its harness's background, the line
-    /// its prompt.
-    Resumed,
-    /// Left to its hooks, which tell it at the end of its turn: why.
-    Left(String),
-    /// It could have been woken, and was not: why.
-    Failed(String),
-}
-
 /// The steps each harness binds behind its intents (`Harness`): what it
 /// runs, one by one. Only the implementations call them.
 pub trait Steps: Send + Sync {
@@ -196,13 +181,6 @@ pub trait Steps: Send + Sync {
         let _ = id;
         None
     }
-    /// How an attached session of it says it shows its own list of
-    /// sessions (Claude's agents view, which `←` opens): the list it shows
-    /// is Relay's, so the attach lets go and Relay's comes back. Its
-    /// profile's `sessions.agents_view`; none where Relay does not know.
-    fn agents_view(&self) -> Option<&ScreenMark> {
-        self.profile().sessions.as_ref()?.agents_view.as_ref()
-    }
     /// How its conversation `session_id`, open in another terminal, carries
     /// on: by default its profile's `resume`, held by Relay. None: no way.
     fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
@@ -256,93 +234,6 @@ pub trait Steps: Send + Sync {
         }
         let args = ping.iter().map(|a| a.replace(ID, id).replace(TEXT, text));
         Some(std::iter::once(self.bin().to_string()).chain(args).collect())
-    }
-
-    /// Whether `rename` would rename `row` to `name` in the harness itself,
-    /// as it stands (its profile's `sessions.rename`): a call on its daemon
-    /// always; a line typed only into one that is idle, and never to clear
-    /// a name.
-    fn renames(&self, row: &NativeRow, name: &str) -> bool {
-        match self.profile().sessions.as_ref().and_then(|s| s.rename.as_ref()) {
-            Some(Rename::Rpc(_)) => true,
-            Some(Rename::Type(_)) => !name.trim().is_empty() && row.state.state == RunState::Idle,
-            None => false,
-        }
-    }
-    /// Renames its session `row` to `name` in the harness itself, as its
-    /// profile's `sessions.rename` says; `locks` is where typing keeps its
-    /// lock files. A harness whose rename is a call on its daemon makes the
-    /// call itself (Codex).
-    fn rename_row(&self, row: &NativeRow, name: &str, locks: &Path) -> Result<()> {
-        let who = self.name();
-        match self.profile().sessions.as_ref().and_then(|s| s.rename.as_ref()) {
-            Some(Rename::Type(line)) if !name.trim().is_empty() => {
-                self.type_into(row, &line.replace(NAME, name.trim()), locks)
-            }
-            Some(Rename::Type(_)) => bail!("{who} has no way to clear a name"),
-            Some(Rename::Rpc(method)) => bail!("{who} renames through `{method}` on a daemon Relay has no way to"),
-            None => bail!("{who} has no way to rename one of its sessions"),
-        }
-    }
-    /// Types `line` into its session `row`, idle, through its attach on a
-    /// hidden terminal (`typing::type_line`), as its profile's
-    /// `sessions.typing` reads the screen.
-    fn type_into(&self, row: &NativeRow, line: &str, locks: &Path) -> Result<()> {
-        let typing = self
-            .profile()
-            .sessions
-            .as_ref()
-            .and_then(|s| s.typing.as_ref())
-            .ok_or_else(|| anyhow!("{} says nothing of how to type into one", self.name()))?;
-        if row.state.state != RunState::Idle {
-            bail!("it is {}, not idle", row.state.words);
-        }
-        let argv = self
-            .attach_argv(&row.id)
-            .ok_or_else(|| anyhow!("{} has no attach", self.name()))?;
-        let cwd = if row.cwd.is_dir() {
-            row.cwd.as_path()
-        } else {
-            Path::new("/")
-        };
-        let lock = crate::typing::lock_path(locks, self.name(), &row.id);
-        crate::typing::type_line(&argv, cwd, typing, line, &lock)
-    }
-    /// Wakes its session `row` for relay mail, `line` the words that say so,
-    /// as its profile's `sessions.wake` says: an idle one has the line typed
-    /// into it, one that has stopped is carried on in its background with
-    /// the line as its prompt; one working or waiting on you is left to its
-    /// hooks. None: it has no way to be woken (Codex is pinged instead).
-    fn wake(&self, row: &NativeRow, line: &str, locks: &Path) -> Option<Woke> {
-        let wake = &self.profile().sessions.as_ref()?.wake;
-        if wake.idle.is_none() && wake.stopped.is_none() {
-            return None;
-        }
-        let who = self.name();
-        Some(match row.state.state {
-            RunState::Idle if wake.idle.is_some() => match self.type_into(row, line, locks) {
-                Ok(()) => Woke::Typed,
-                Err(e) => Woke::Failed(format!("{who} wasn't woken: {e:#}")),
-            },
-            s if s.is_terminal() && wake.stopped.is_some() => match self.resume_with(row, line) {
-                Ok(()) => Woke::Resumed,
-                Err(e) => Woke::Failed(format!("{who} wasn't carried on: {e:#}")),
-            },
-            RunState::NeedsInput => Woke::Left(format!("{who} waits on you; it will see it once you answer")),
-            RunState::Working | RunState::Starting => {
-                Woke::Left(format!("{who} is busy; it will see it at the end of its turn"))
-            }
-            _ => Woke::Failed(format!("{who} is {}; nothing wakes it from there", row.state.words)),
-        })
-    }
-    /// Carries its stopped session `row` on in its background with `line` as
-    /// its prompt (Claude's `claude --resume <session> --bg <line>`).
-    fn resume_with(&self, row: &NativeRow, line: &str) -> Result<()> {
-        let Some(CarryOn::Background(mut argv)) = self.carry_on(&row.session_id) else {
-            bail!("{} has no background to carry it on in", self.name());
-        };
-        argv.extend(self.profile().prompt_args(line));
-        run(&argv, Some(&row.cwd), false, START_WAIT).map(drop)
     }
 
     // Setup.
@@ -401,12 +292,6 @@ pub trait Steps: Send + Sync {
     /// news): it has no way in from outside (Claude).
     fn mail_by_hooks(&self) -> bool {
         false
-    }
-    /// What a caller of this harness is told to do to wake its own session
-    /// `name` for mail, where it has a way Relay cannot run.
-    fn wake_advice(&self, name: &str) -> Option<String> {
-        let _ = name;
-        None
     }
 }
 
@@ -1407,123 +1292,6 @@ mod tests {
         std::fs::write(tmp.path().join("refuse"), format!("{refusal}\n")).unwrap();
         let e = Steps::remove_id(h.as_ref(), "ab12cd34", tmp.path()).unwrap_err();
         assert_eq!(e.to_string(), refusal, "every line, as said");
-    }
-
-    /// A Claude whose binary is a stand-in in `dir`: its `attach` draws an
-    /// idle Claude (`fixtures/stand-in-claude-attach`, as `variant`) and
-    /// keeps what is typed in `dir/typed`; anything else it is run with is
-    /// kept in `dir/argv`, a word a line.
-    fn stand_in_claude(dir: &Path, variant: &str) -> Box<dyn Harness> {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = dir.join("claude");
-        let attach = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-claude-attach");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = attach ] && exec python3 '{attach}' {variant} '{}'\nprintf '%s\\n' \"$@\" > '{}/argv'\n",
-                dir.display(),
-                dir.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        of(Registry::builtin().profile("claude").unwrap(), Some(bin))
-    }
-
-    fn row_at(cwd: &Path, words: &str, state: RunState) -> NativeRow {
-        NativeRow {
-            harness: "claude".into(),
-            id: "ab12cd34".into(),
-            session_id: "s-1".into(),
-            name: "fix".into(),
-            cwd: cwd.into(),
-            state: NativeState {
-                words: words.into(),
-                state,
-            },
-            summary: None,
-            started: None,
-            ended: None,
-            at: None,
-            pr: None,
-            color: None,
-        }
-    }
-
-    #[test]
-    fn claude_is_woken_by_a_line_typed_when_idle_and_carried_on_when_stopped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        let locks = dir.join("typing");
-        let c = stand_in_claude(&dir, "idle");
-        let line = "relay mail from api: call the relay inbox tool to read it";
-        let idle = row_at(&dir, "idle", RunState::Idle);
-        assert_eq!(c.wake(&idle, line, &locks), Some(Woke::Typed));
-        assert_eq!(std::fs::read_to_string(dir.join("typed")).unwrap(), format!("{line}\n"));
-        let stopped = row_at(&dir, "completed", RunState::Finished);
-        assert_eq!(c.wake(&stopped, line, &locks), Some(Woke::Resumed));
-        assert_eq!(
-            std::fs::read_to_string(dir.join("argv")).unwrap(),
-            format!("--resume\ns-1\n--bg\n{line}\n"),
-            "claude --resume <session> --bg <line>"
-        );
-        for (words, state, said) in [
-            (
-                "working",
-                RunState::Working,
-                "claude is busy; it will see it at the end of its turn",
-            ),
-            (
-                "needs input",
-                RunState::NeedsInput,
-                "claude waits on you; it will see it once you answer",
-            ),
-        ] {
-            assert_eq!(
-                c.wake(&row_at(&dir, words, state), line, &locks),
-                Some(Woke::Left(said.into()))
-            );
-        }
-        assert_eq!(
-            std::fs::read_to_string(dir.join("typed")).unwrap().lines().count(),
-            1,
-            "nothing more typed"
-        );
-        // You are attached: not woken, and why.
-        let lock = crate::typing::lock_path(&locks, "claude", "ab12cd34");
-        let _you = crate::typing::Attached::hold(&lock).unwrap();
-        assert_eq!(
-            c.wake(&idle, line, &locks),
-            Some(Woke::Failed("claude wasn't woken: you are attached to it".into()))
-        );
-    }
-
-    #[test]
-    fn claude_is_renamed_by_typing_its_slash_command_only_when_idle() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        let locks = dir.join("typing");
-        let c = stand_in_claude(&dir, "idle");
-        let idle = row_at(&dir, "idle", RunState::Idle);
-        let busy = row_at(&dir, "working", RunState::Working);
-        assert!(c.renames(&idle, "the fix"));
-        assert!(!c.renames(&busy, "the fix"), "busy: the name stays Relay's");
-        assert!(!c.renames(&idle, " "), "a name is not cleared in Claude");
-        Steps::rename_row(c.as_ref(), &idle, " the fix ", &locks).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("typed")).unwrap(), "/rename the fix\n");
-        let e = Steps::rename_row(c.as_ref(), &busy, "x", &locks).unwrap_err();
-        assert_eq!(e.to_string(), "it is working, not idle");
-        // The held have no rename and no wake.
-        let all = harnesses(&Registry::builtin(), |_| None);
-        let gemini = all.iter().find(|h| h.name() == "gemini").unwrap();
-        assert!(!gemini.renames(&idle, "x"));
-        assert_eq!(gemini.wake(&idle, "x", &locks), None);
-        let codex = all.iter().find(|h| h.name() == "codex").unwrap();
-        assert!(
-            codex.renames(&busy, "x") && codex.renames(&idle, ""),
-            "a call: any time, empty too"
-        );
-        assert_eq!(codex.wake(&idle, "x", &locks), None, "codex is pinged");
     }
 
     // ---- The intents ----------------------------------------------------

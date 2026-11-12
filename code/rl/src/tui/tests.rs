@@ -828,14 +828,10 @@ async fn enter_hands_a_held_session_over_and_a_native_one_to_its_harness() {
     press(&mut app, KeyCode::Enter);
     let hand = app.hand.take().expect("handed over");
     assert_eq!(hand.key, NATIVE);
-    let super::app::To::Argv { argv, back } = &hand.to else {
+    let super::app::To::Argv { argv } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["attach", "ab12cd34"], "claude attach <id>");
-    // Its agents view, should it come up in the attach, gives the list back.
-    let back = back.as_ref().expect("claude's agents view is known");
-    assert!(back.on("~/shop\n\n❯ describe a task for a new session\n  enter to open"));
-    assert!(!back.on("❯ fix the login\n  ⎿ ❯ describe a task for a new session"));
 }
 
 /// What the harness's stand-in was last run with in `dir` (`sources`).
@@ -1188,7 +1184,6 @@ async fn a_carry_on_done_while_a_name_is_typed_does_not_take_the_terminal() {
         hand: Some(super::app::Hand {
             to: super::app::To::Argv {
                 argv: vec!["claude".into(), "attach".into(), "ab12cd34".into()],
-                back: None,
             },
             title: "fix the login".into(),
             key: NATIVE.into(),
