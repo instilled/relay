@@ -684,8 +684,13 @@ pub fn state(status: &Status) -> NativeState {
 
 /// The threads as rows: Codex's sessions, not its sub-agents' threads, not
 /// one only on disk that Relay did not start, not one without a whole
-/// folder. A thread listed twice stands once, as first listed.
+/// folder, and not an empty one — no name and no prompt yet. Codex's TUI
+/// makes those as it opens and again after a turn, and the daemon lists
+/// them until it unloads them; as rows they were a second session named
+/// after the folder, with nothing in it. A thread listed twice stands
+/// once, as first listed.
 pub fn rows(threads: Vec<Thread>) -> Vec<NativeRow> {
+    let blank = |s: &Option<String>| s.as_deref().is_none_or(|s| s.trim().is_empty());
     let mut seen = HashSet::new();
     threads
         .into_iter()
@@ -694,6 +699,7 @@ pub fn rows(threads: Vec<Thread>) -> Vec<NativeRow> {
                 && t.parent_thread_id.is_none()
                 && (t.status.kind != "notLoaded" || t.originator.as_deref() == Some(CLIENT))
                 && t.cwd.is_absolute()
+                && !(blank(&t.name) && blank(&t.preview))
         })
         .filter(|t| seen.insert(t.id.clone()))
         .map(row)
@@ -1451,12 +1457,31 @@ mod tests {
             cwd: "/w/x".into(),
             ..relative
         };
-        let r = &rows(vec![bare])[0];
+        assert!(
+            rows(vec![bare.clone()]).is_empty(),
+            "no name, no prompt: an empty thread Codex's TUI made, no session"
+        );
+        let blank = Thread {
+            preview: Some("  \n".into()),
+            name: Some(String::new()),
+            ..bare.clone()
+        };
+        assert!(rows(vec![blank]).is_empty(), "blank is empty too");
+        let prompted = Thread {
+            preview: Some("\nfix the login\nand more".into()),
+            ..bare.clone()
+        };
+        let r = &rows(vec![prompted])[0];
         assert_eq!(
             (r.name.as_str(), r.session_id.as_str(), r.at),
-            ("x", "t", None),
-            "its folder's name"
+            ("fix the login", "t", None),
+            "its first prompt's first line"
         );
+        let named = Thread {
+            name: Some("login".into()),
+            ..bare
+        };
+        assert_eq!(rows(vec![named])[0].name, "login", "named, though nothing asked yet");
     }
 
     fn codex(bin: PathBuf) -> Codex {
