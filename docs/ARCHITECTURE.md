@@ -93,8 +93,11 @@ Folders are 0700.
   question) and runs it on
   the row under the cursor through the same code.
 - **List.** Held sessions come from `sessions/`. Hooked-only ones come from `state/`. Claude's and
-  Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout;
-  one that fails is skipped. `rows/` merges them and groups them, each under its project: a
+  Codex's own come from asking them (`sessions.list` in the profile), each with its own timeout.
+  While the list is open each harness is asked on a task of its own, at its own interval
+  (`tui::live::Native`): its answer is published as it comes and replaces only its own rows, so a
+  slow one holds up no other; one that fails keeps its last rows, marked stale. Attaching pauses
+  them all, and `ask_now` wakes them all. `rows/` merges them and groups them, each under its project: a
   folder you named, else its git checkout (`git::project`, read from the files: a linked
   worktree's `.git` file is followed through its `commondir` to the main checkout; a submodule's,
   which has none, is a project of its own). State comes from, in order, the
@@ -195,6 +198,12 @@ Folders are 0700.
 A harness is `detect/<name>.yaml`. `rl-detect/src/registry.rs` compiles the built-ins in and merges
 `$RELAY_HOME/detect/*.yaml` over them field by field. `generic` is the floor every profile extends.
 
+A profile alone adds a harness that uses the integration Relay already has: sessions Relay holds,
+hooks in a dialect it reads, MCP registration in a style it writes (`mcp.file`, `mcp.cli`, Claude's
+and Codex's), a listing one of the readers parses (`claude-agents`, `codex-threads`), and rename
+and wake by a typed line or a resumed run. A harness with a session protocol of its own (as Codex's
+app-server is) needs an adapter, an implementation of `Harness` in `rl-detect`.
+
 The format is strict. Every struct is `deny_unknown_fields`: a key it does not know is an error
 when the profile loads. Keys:
 
@@ -288,7 +297,10 @@ The caller's address, in order:
 A known caller wins over a passed `from`/`as`. Codex sets no id Relay knows, so it takes step 3.
 Addresses: a held session is its name; a hooked-only one its full session id; a native one its
 name, or the harness id when the name is empty or repeats. `send` also takes the row's `ctrl+r` title
-or a conversation id. A `send` to a held name asks no harness for its list.
+or a conversation id. A `send` to a held name asks no harness for its list. Where the harnesses
+are asked (`who`, finding an address), they are asked at once, each on a thread, for
+`mcp::LIST_WAIT` (5s) (`sources::list_all`, as `rl ls` does): one that fails or is slower is left
+out, with a note in `who`'s answer and in an address not found, and the others answer.
 
 `rl setup` iterates the harnesses and registers `rl mcp --harness <h>` where each says
 (`Harness::mcp`): Claude through `claude mcp add --scope user` (run with a timeout in a process

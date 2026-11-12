@@ -289,6 +289,12 @@ A harness is a file, `detect/<name>.yaml`. The built-in ones are compiled in (`a
 `claude`, `codex`, `cursor`, `gemini`, `opencode`, `sh`, with `generic` as the floor under all). Yours in
 `~/.relay/detect/` merge over them field by field; a new name adds a harness.
 
+A profile covers a harness that works the way one Relay already knows does: run in a session
+Relay holds, hooks in a dialect Relay reads, MCP registered in one of the styles Relay writes, its
+own sessions listed in Claude's or Codex's format, renamed and woken by a typed line or a resumed
+run. A harness with a session protocol of its own (as Codex's app-server is) needs an adapter in
+`rl-detect`, which is code.
+
 Keys a profile accepts:
 
 - `kind`: `agent`, `shell`, `command` or `plugin`
