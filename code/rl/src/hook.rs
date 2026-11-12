@@ -214,7 +214,7 @@ pub async fn hook(home: &Home, words: &Words) {
 /// conversation), as the JSON Claude reads from a hook's output; None when
 /// it is told nothing. A `Stop` blocks once for the same mail: the newest
 /// it told of is kept (`mail::set_told`), and only newer mail blocks again.
-fn news(home: &Home, agent: &str, event: &str, held: Option<&str>, payload: &Value) -> Option<Value> {
+pub(crate) fn news(home: &Home, agent: &str, event: &str, held: Option<&str>, payload: &Value) -> Option<Value> {
     if event != PROMPT && event != STOP {
         return None;
     }

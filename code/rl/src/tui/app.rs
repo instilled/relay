@@ -40,6 +40,9 @@ pub enum Mode {
     List,
     /// `^r`: a name typed where it stands.
     Rename(Renaming),
+    /// `^x` twice (or `/rm`) on one of a harness's own: what to do with it,
+    /// asked in the footer until a choice is taken or `esc`.
+    Ask(super::remove::Ask),
 }
 
 /// `^r` under way: the line's key, what is typed, the name it had, and its
@@ -97,6 +100,9 @@ pub struct Done {
     pub ask_native: bool,
     /// What `setup::check` said, after the start's check or a `/setup`.
     pub setup: Option<Checked>,
+    /// A row its harness has renamed (its key, and the name): the name is
+    /// the harness's own now, and Relay keeps none of its own for it.
+    pub renamed: Option<(String, String)>,
 }
 
 /// How setup stands, as `setup::check` last said: what needs setting up, or
@@ -116,6 +122,7 @@ impl Done {
             gave_up: false,
             ask_native: false,
             setup: None,
+            renamed: None,
         }
     }
 
@@ -298,9 +305,26 @@ impl App {
             .collect();
     }
 
-    /// What the harnesses' listers now say.
+    /// What the harnesses' listers now say. A name you gave one of their
+    /// rows that its harness now calls it too is Relay's no longer: the
+    /// harness's own stands alone (a rename that reached it).
     pub fn heard(&mut self, said: Said) {
         self.native = said;
+        let same: Vec<String> = self
+            .native
+            .rows
+            .iter()
+            .map(|n| (format!("n:{}:{}", n.harness, n.id), &n.name))
+            .filter(|(k, name)| self.config.list.names.get(k) == Some(*name))
+            .map(|(k, _)| k)
+            .collect();
+        if !same.is_empty() {
+            self.change_prefs(|p| {
+                for k in &same {
+                    p.names.remove(k);
+                }
+            });
+        }
         self.reload();
     }
 

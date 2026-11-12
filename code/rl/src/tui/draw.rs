@@ -544,6 +544,10 @@ impl App {
     /// keys while it is typed, or the hints — entries of the grid's, so they
     /// say what it does — with a pointer to the grid where there is room.
     fn footer(&self, width: usize) -> String {
+        // A choice asked stands over any word of the moment: it has the keys.
+        if let Mode::Ask(a) = &self.mode {
+            return a.offer();
+        }
         if let Some(m) = self.flashing() {
             return m.to_string();
         }
@@ -570,7 +574,7 @@ impl App {
         };
         let mut hints = vec![
             help::hint(help::Id::Enter, None),
-            help::hint(help::Id::Remove, Some(self.x_hint())),
+            help::hint(help::Id::Remove, Some(&self.x_hint())),
             help::hint(help::Id::Find, None),
             help::hint(help::Id::Commands, None),
         ];
@@ -599,15 +603,22 @@ impl App {
     }
 
     /// What `^x` does to the line under the cursor, in the hints' words.
-    fn x_hint(&self) -> &'static str {
+    fn x_hint(&self) -> String {
+        let hidden = |key: &str| self.prefs().hidden.iter().any(|h| h.key == key);
         match self.selected() {
             Some(ListLine::Session(r)) => match r.source {
-                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove",
-                Source::Held => "to stop",
-                Source::Native if r.stop.is_some() => "to stop",
-                _ => "to hide",
+                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove".into(),
+                Source::Held => "to stop".into(),
+                Source::Native if hidden(&r.key) => "to bring back".into(),
+                Source::Native => match (&r.stop, &r.close) {
+                    (Some(_), Some(c)) => format!("to stop or {}", c.words),
+                    (None, Some(c)) => format!("to {}", c.words),
+                    (Some(_), None) => "to stop".into(),
+                    (None, None) => "to hide".into(),
+                },
+                _ => "to hide".into(),
             },
-            _ => "to hide",
+            _ => "to hide".into(),
         }
     }
 
@@ -674,7 +685,7 @@ impl App {
             };
             let room = w.saturating_sub(spans.iter().map(Span::width).sum());
             spans.extend(cap_spans(
-                theme::with_caret(rn.line.text(), rn.line.cursor(), Style::default()),
+                theme::with_selection(rn.line.text(), rn.line.cursor(), rn.line.selection(), Style::default()),
                 room,
             ));
             drawn = Line::from(spans);

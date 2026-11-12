@@ -37,6 +37,7 @@ impl App {
         // A name being typed has every key until it is done.
         match self.mode {
             Mode::Rename(_) => return self.key_rename(k),
+            Mode::Ask(_) => return self.key_ask(k),
             Mode::List => {}
         }
         // The filters are on ctrl keys, so every letter types: `^a` agents,
@@ -228,7 +229,7 @@ impl App {
         match (k.code, k.modifiers) {
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.key_x(armed),
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here(),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.rename_here("ctrl+r"),
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => self.toggle_pin("ctrl+t"),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => self.cycle_colour(),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -300,6 +301,8 @@ impl App {
         // A name being typed takes it first.
         match &mut self.mode {
             Mode::Rename(r) => return r.line.insert(&s),
+            // A choice is a key, never a paste.
+            Mode::Ask(_) => return,
             Mode::List => {}
         }
         let Some(search) = self.search.as_mut() else {

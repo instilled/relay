@@ -24,12 +24,13 @@
 //! (`codex resume <id>`), which opens it through the same daemon: the
 //! app-server rejoins a thread that is running (and shows an approval it
 //! waits on), or loads one at rest. Stopping one interrupts its running
-//! turn (`turn/interrupt`); the thread stays.
+//! turn (`turn/interrupt`); the thread stays. Closing one archives it (the
+//! profile's `sessions.close`: `codex archive <id>`), never deletes it.
 
 use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Started};
 use crate::mcp_entry::{How, Place};
 use crate::registry::Profile;
-use crate::sessions::ID;
+use crate::sessions::{ID, Rename};
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use rl_core::state::RunState;
@@ -122,6 +123,16 @@ impl Codex {
     }
 }
 
+impl Codex {
+    /// The method its profile renames a thread by, where it is a call.
+    fn rename_method(&self) -> Option<String> {
+        match self.profile.sessions.as_ref()?.rename.as_ref()? {
+            Rename::Rpc(m) => Some(m.clone()),
+            Rename::Type(_) => None,
+        }
+    }
+}
+
 impl Harness for Codex {
     fn profile(&self) -> &Profile {
         &self.profile
@@ -188,6 +199,18 @@ impl Harness for Codex {
     fn stop(&self, id: &str, _: &Path) -> Result<()> {
         let id = id.to_string();
         self.on_daemon(move |d| interrupt(d, &id))
+    }
+
+    /// The call its profile's `sessions.rename` names, on its daemon
+    /// (`thread/name/set`): any thread, any name, an empty one too.
+    fn renames(&self, _: &NativeRow, _: &str) -> bool {
+        self.rename_method().is_some()
+    }
+
+    fn rename(&self, row: &NativeRow, name: &str, _: &Path) -> Result<()> {
+        let method = self.rename_method().context("its profile says no `sessions.rename`")?;
+        let (id, name) = (row.id.clone(), name.trim().to_string());
+        self.on_daemon(move |d| set_name(d, &method, &id, &name))
     }
 
     /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
@@ -442,6 +465,12 @@ pub fn begin<R: Read, W: Write>(rpc: &mut Rpc<R, W>, cwd: &Path, name: Option<&s
         json!({"threadId": id, "input": [{"type": "text", "text": prompt}]}),
     )?;
     Ok(id)
+}
+
+/// Names the thread `id` `name` by `method` (`thread/name/set`).
+pub fn set_name<R: Read, W: Write>(rpc: &mut Rpc<R, W>, method: &str, id: &str, name: &str) -> Result<()> {
+    rpc.call(method, json!({"threadId": id, "name": name}))?;
+    Ok(())
 }
 
 /// Interrupts the turn the thread `id` is running (`turn/interrupt`).
@@ -803,6 +832,18 @@ mod tests {
         );
         let (_, sent) = talk(|rpc| begin(rpc, Path::new("/w/relay"), None, "x").unwrap());
         assert!(!methods(&sent).contains(&"thread/name/set"), "no name, none set");
+    }
+
+    #[test]
+    fn a_rename_names_the_thread_on_the_daemon() {
+        let id = "01a1ca12-27f5-7ca0-a8ef-8593acea7ed9";
+        let ((), sent) = talk(|rpc| set_name(rpc, "thread/name/set", id, "login").unwrap());
+        assert_eq!(methods(&sent)[2..], ["thread/name/set"]);
+        assert_eq!(sent[2]["params"], json!({"threadId": id, "name": "login"}));
+        assert_eq!(
+            codex("codex".into()).rename_method().as_deref(),
+            Some("thread/name/set")
+        );
     }
 
     #[test]
