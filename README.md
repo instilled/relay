@@ -215,7 +215,8 @@ conversation content is kept.
 - Relay never reads a harness's screen to act or types into one: it uses only what a harness
   documents (its CLI, `claude agents --json`, Codex's app-server, the hooks). So a Claude is renamed
   only when Relay next starts it, and waking an idle Claude for mail carries its conversation on in a
-  new background session (a new id; the old one stays listed as ended).
+  new background session under a new id (your name, pin and colour move to it; the old row is
+  hidden, not removed).
 - `rl mcp` in Codex can't tell which thread called it: a Codex caller passes `from`/`as` itself.
 - Antigravity has no hooks or screen patterns yet, so its state is a guess.
 - A Codex thread started with bare `codex` is listed only while the daemon has it loaded.

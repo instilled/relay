@@ -2467,3 +2467,61 @@ async fn tab_completes_the_folder_of_slash_project_under_the_rows_folder() {
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.cmd.line.text(), "/project src/");
 }
+
+#[tokio::test]
+async fn a_row_carried_on_as_a_new_one_elsewhere_shows_once_under_the_new_key_with_what_you_kept() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 't');
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // `rl mcp` woke it as a new session and carried the row over.
+    let new = "n:claude:9f1e2d3c";
+    let mut c = Config::load(&f.home).unwrap();
+    c.list.names.insert(NATIVE.into(), "login box".into());
+    c.list.carry(NATIVE, new, Timestamp::now());
+    c.save(&f.home).unwrap();
+    let old = NativeRow {
+        state: NativeState {
+            words: "completed".into(),
+            state: RunState::Finished,
+        },
+        ..waiting(&f.repo)
+    };
+    let carried = NativeRow {
+        id: "9f1e2d3c".into(),
+        session_id: "s-2".into(),
+        name: "fix the login".into(),
+        ..waiting(&f.repo)
+    };
+    app.set_native(vec![old, carried]);
+    let s = shown(&app);
+    assert_eq!(s.matches("login box").count(), 1, "one row: {s}");
+    assert!(!app.keys().iter().any(|k| k == NATIVE), "the old one hidden");
+    assert_eq!(app.keys()[0], new, "pinned, as the old one was: {s}");
+    assert_eq!(app.prefs().pins, [new]);
+}
+
+#[tokio::test]
+async fn a_conversation_carried_on_from_another_terminal_takes_what_you_kept_for_its_row() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let (old, new) = ("o:claude:s-9", "n:claude:9f1e2d3c");
+    app.change_prefs(|p| {
+        p.names.insert(old.into(), "login box".into());
+        p.colors.insert(old.into(), "blue".into());
+        p.pins.push(old.into());
+    });
+    app.done(super::app::Done {
+        carried: Some((old.into(), new.into())),
+        ..super::app::Done::said("login box carries on in claude's background")
+    });
+    let p = Config::load(&f.home).unwrap().list;
+    assert_eq!(p.names.get(new).map(String::as_str), Some("login box"));
+    assert_eq!(p.colors.get(new).map(String::as_str), Some("blue"));
+    assert_eq!(p.pins, [new]);
+    assert!(
+        p.hidden.iter().any(|h| h.key == old),
+        "the old row hidden, as /hide does"
+    );
+}

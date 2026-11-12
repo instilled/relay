@@ -12,7 +12,7 @@
 //! --resume <session> --bg`).
 
 use crate::harness::{
-    self, Actions, Attach, Compat, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, Pr, RenameHow,
+    self, Actions, Attach, Compat, Forked, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, Pr, RenameHow,
     Renamed, Session, Start, Started, held,
 };
 use crate::mcp_entry::How;
@@ -287,7 +287,7 @@ impl Harness for Claude {
             _ => Err(format!("claude is {}; nothing wakes it from there", s.words)),
         };
         match woke {
-            Ok(()) => Notified::Woken,
+            Ok(forked) => Notified::Woken(forked),
             Err(why) if mail.from_harness == self.harness && !s.name.is_empty() => Notified::Failed(format!(
                 "{why}\n{} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\").",
                 s.name
@@ -357,12 +357,23 @@ impl Claude {
 
     /// Carries `s` on in its background, the mail's line its prompt, with
     /// the name you gave it.
-    fn wake(&self, s: &Session, mail: &Mail) -> Result<()> {
+    /// Carries `s` on in its background, the mail's line its prompt, and
+    /// says the new session that began, once Claude lists it (None: not
+    /// within `LISTED_WAIT`; it was started all the same).
+    fn wake(&self, s: &Session, mail: &Mail) -> Result<Option<Forked>> {
         let line = mail.line();
         let argv = self
             .bg_argv(Some(&s.session_id), s.relay_name.as_deref(), Some(&line))
             .context("its profile says no way to carry one on in its background")?;
-        harness::run(&argv, Some(&s.cwd), false, harness::START_WAIT).map(drop)
+        let printed = harness::run(&argv, Some(&s.cwd), false, harness::START_WAIT)?;
+        let before = HashSet::from([s.id.clone()]);
+        let ids = printed_ids(&argv, &printed);
+        Ok(
+            listed(|w| self.list_within(w), &ids, &s.cwd, &before, LISTED_WAIT).map(|r| Forked {
+                id: r.id,
+                session_id: r.session_id,
+            }),
+        )
     }
 
     /// Its listing changed shape: drift.
@@ -425,7 +436,20 @@ pub fn begin(
     listed: Duration,
 ) -> Result<String> {
     let printed = harness::run(argv, Some(cwd), false, harness::START_WAIT)?;
-    let ids = started_ids(&printed);
+    let ids = printed_ids(argv, &printed);
+    match self::listed(list, &ids, cwd, before, listed) {
+        Some(r) => Ok(r.id),
+        None => {
+            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
+            bail!("{}", last.map_or("it printed nothing", str::trim));
+        }
+    }
+}
+
+/// The ids `argv` printed for what it started (`started_ids`); none is
+/// drift.
+fn printed_ids(argv: &[String], printed: &str) -> Vec<String> {
+    let ids = started_ids(printed);
     if ids.is_empty() {
         crate::drift::notice(crate::drift::Noticed::new(
             crate::user_hooks::CLAUDE,
@@ -434,22 +458,35 @@ pub fn begin(
             "`claude --bg` printed no session id",
         ));
     }
+    ids
+}
+
+/// The session one of `ids` names once `list` has it, in `cwd` and not
+/// among `before`; asked for up to `listed`. None: not so listed in time.
+fn listed(
+    list: impl Fn(Duration) -> Result<Vec<NativeRow>>,
+    ids: &[String],
+    cwd: &Path,
+    before: &HashSet<String>,
+    listed: Duration,
+) -> Option<NativeRow> {
+    if ids.is_empty() {
+        return None;
+    }
     let deadline = Instant::now() + listed;
     loop {
         // The whole loop, its listings too, is bounded by `listed`.
         let left = deadline.saturating_duration_since(Instant::now());
-        if !ids.is_empty()
-            && !left.is_zero()
-            && let Ok(rows) = list(left.min(harness::LIST_WAIT))
-            && let Some(id) = ids
-                .iter()
-                .find(|id| !before.contains(*id) && rows.iter().any(|r| r.id == **id && harness::same_dir(&r.cwd, cwd)))
-        {
-            return Ok(id.clone());
+        if left.is_zero() {
+            return None;
         }
-        if ids.is_empty() || Instant::now() >= deadline {
-            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
-            bail!("{}", last.map_or("it printed nothing", str::trim));
+        if let Ok(rows) = list(left.min(harness::LIST_WAIT))
+            && let Some(r) = ids.iter().find_map(|id| {
+                rows.iter()
+                    .find(|r| !before.contains(id) && r.id == *id && harness::same_dir(&r.cwd, cwd))
+            })
+        {
+            return Some(r.clone());
         }
         std::thread::sleep(LISTED_EVERY);
     }

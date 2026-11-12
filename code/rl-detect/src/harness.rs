@@ -406,11 +406,21 @@ impl Mail {
     }
 }
 
+/// A session carried on as a new one on the same conversation: its id and
+/// its conversation id, both new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forked {
+    pub id: String,
+    pub session_id: String,
+}
+
 /// What came of telling a session it has mail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notified {
-    /// Woken now, the mail's line its prompt: it was told.
-    Woken,
+    /// Woken now, the mail's line its prompt: it was told. Where waking it
+    /// began a new session on its conversation (Claude's `--resume … --bg`),
+    /// that one.
+    Woken(Option<Forked>),
     /// Queued on it, for it to see now or when it next runs.
     Queued,
     /// Its hooks tell it, at its next prompt or turn's end; why it is left
@@ -427,7 +437,7 @@ impl Notified {
     /// nothing to say.
     pub fn words(&self, harness: &str) -> String {
         match self {
-            Notified::Woken => format!(" · woke {harness}"),
+            Notified::Woken(_) => format!(" · woke {harness}"),
             Notified::Queued => format!(" · pinged {harness}"),
             Notified::ByHooks(Some(why)) | Notified::Failed(why) => format!(" · {why}"),
             Notified::ByHooks(None) | Notified::AtNextInbox => String::new(),
@@ -1292,7 +1302,7 @@ mod tests {
             relay_name: Some("the fix".into()),
             ..session("claude", Owner::Own, RunState::Idle, &dir)
         };
-        assert_eq!(c.notify(&idle, &mail), Notified::Woken);
+        assert_eq!(c.notify(&idle, &mail), Notified::Woken(None), "it printed no id");
         assert_eq!(
             calls(&dir),
             [
@@ -1302,7 +1312,7 @@ mod tests {
             "claude stop <id>, then claude --resume <session> --bg -n <name> <line>"
         );
         let ended = session("claude", Owner::Own, RunState::Finished, &dir);
-        assert_eq!(c.notify(&ended, &mail), Notified::Woken);
+        assert_eq!(c.notify(&ended, &mail), Notified::Woken(None));
         assert_eq!(
             calls(&dir),
             [vec!["--resume", "s-1", "--bg", line]],

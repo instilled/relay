@@ -50,6 +50,7 @@ Folders are the truth: liveness is read from files and sockets; every write is `
 | `mail/<key>/<ns>-<pid>-<n>-<from>.json` | `rl mcp` | a waiting message |
 | `mail/<key>/delivered/` | `rl mcp` | messages read, kept 7 days (`mail::KEPT`) |
 | `mail/<key>/.told` | `rl hook`, `rl mcp` | the newest mail a Claude was told of |
+| `mail/<key>/.moved`, `.was` | `rl mcp` | the key a woken Claude carries on under; the keys it had before |
 | `attached/<harness>-<id>` | the list | that you are attached to a native session from the list (the attach's pid) |
 | `config.json` | `rl setup`, the list | harnesses, badges, `setup.declined`, list prefs (grouping, filters, order, hidden, pins, names, colours, `default`, `projects`). Strict |
 | `hooks/` | `rl new` | per-run settings passed to a harness (Claude's `--settings`) |
@@ -242,8 +243,14 @@ says what came of it in its text; none is a failure:
 - **Woken** (Claude's, a session in its background): idle, it is stopped (`claude stop <id>`) and
   carried on with `claude --resume <session> --bg [-n name] "<line>"`; ended, the resume alone. The
   line names the sender and asks it to call the inbox tool. `send` records it as told
-  (`mail::set_told`). Claude's resume starts a new background session on the same conversation (a
-  new id); the old one stays listed as ended.
+  (`mail::set_told`). Claude's resume starts a new background session on the same conversation
+  (`Woken(Some(Forked))`: a new id and conversation id), so `send` carries the row over: the old
+  row's name, pin, colour and place become the new row's and the old row is hidden as `/hide` does
+  (`ListPrefs::carry`; never `claude rm`, which would take its worktree), and its mail folder
+  forwards to the new one (`mail::moved`: `.moved` in the old, `.was` in the new, so the new one
+  reads what was left for the old and mail to the old address reaches the new). The list reads
+  `config.json` again when it changes (`App::heard_config`). A carry-on from the list
+  (`Attach::CarryOn`) carries its row over the same way.
 - **ByHooks** (Claude's, `info().mail_by_hooks`): working, waiting on you, or attached from the list
   (`attached/`), it is left to the hooks, and `send` says when it will see it. `rl hook claude
   UserPromptSubmit` prints `additionalContext` while mail waits; `rl hook claude Stop` prints

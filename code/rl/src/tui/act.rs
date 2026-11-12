@@ -76,7 +76,7 @@ impl App {
             Attach::Argv(argv) => To::Argv { argv: argv.clone() },
             Attach::CarryOn(start) => {
                 let start = start.clone();
-                return self.carry_on(start, &harness, title);
+                return self.carry_on(start, &harness, title, key);
             }
             Attach::None if source == Source::Hooked && state == rl_core::state::RunState::Idle => {
                 return self.say(format!(
@@ -103,7 +103,7 @@ impl App {
     /// Carries a conversation open in another terminal on, as its harness
     /// starts it (`Harness::start`), then attaches to it: in the harness's
     /// own background, else as a session Relay holds.
-    fn carry_on(&mut self, start: rl_detect::harness::Start, harness: &str, title: String) {
+    fn carry_on(&mut self, start: rl_detect::harness::Start, harness: &str, title: String, from: String) {
         self.say(format!("carrying {title} on…"));
         let a = sources::harness_of(harness);
         let home = self.home.clone();
@@ -115,6 +115,9 @@ impl App {
                 Ok(Ok(Started::Background(id))) => Done {
                     said: format!("{title} carries on in {name}'s background"),
                     select: Some(native_key(&name, &id)),
+                    // A new session on its conversation: the old row's
+                    // name, pin, colour and place are the new one's.
+                    carried: Some((from, native_key(&name, &id))),
                     hand: hand_new(a, &id, &cwd, title),
                     ..Done::said("")
                 },
@@ -311,6 +314,10 @@ impl App {
                     p.names.remove(key);
                 });
             }
+        }
+        if let Some((from, to)) = &d.carried {
+            let at = Timestamp::now();
+            self.change_prefs(|p| p.carry(from, to, at));
         }
         if let Some(key) = &d.forget {
             let key = key.clone();

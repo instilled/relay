@@ -98,6 +98,50 @@ impl Default for ListPrefs {
     }
 }
 
+impl ListPrefs {
+    /// A session its harness carried on under a new row (`from` → `to`:
+    /// Claude's `--resume … --bg` starts a new session on the same
+    /// conversation): what you kept for the old row — your name for it, its
+    /// pin, its colour, its place — is the new row's now, and the old row is
+    /// hidden as `/hide` hides it, so the list shows one. Nothing is removed
+    /// from the harness.
+    pub fn carry(&mut self, from: &str, to: &str, at: Timestamp) {
+        if from == to {
+            return;
+        }
+        if let Some(name) = self.names.remove(from) {
+            self.names.insert(to.to_string(), name);
+        }
+        if let Some(c) = self.colors.remove(from) {
+            self.colors.insert(to.to_string(), c);
+        }
+        // Where it stood, the new row stands; a new row with a place already
+        // keeps that one.
+        let had = |rows: &Vec<String>| rows.iter().any(|k| k == to);
+        if had(&self.pins) {
+            self.pins.retain(|k| k != from);
+        } else {
+            for k in self.pins.iter_mut().filter(|k| *k == from) {
+                *k = to.to_string();
+            }
+        }
+        for o in &mut self.order {
+            if had(&o.rows) {
+                o.rows.retain(|k| k != from);
+            } else {
+                for k in o.rows.iter_mut().filter(|k| *k == from) {
+                    *k = to.to_string();
+                }
+            }
+        }
+        self.hidden.retain(|h| h.key != from);
+        self.hidden.push(Hidden {
+            key: from.to_string(),
+            at,
+        });
+    }
+}
+
 /// A project's rows in the order you put them, first on top — or, under
 /// `Order::PROJECTS`, the projects themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

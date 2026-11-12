@@ -30,9 +30,11 @@ the recipient learns of it depends on its harness:
   | attached from the list | Relay's hooks, at your next prompt | `· you are attached to it; it will see it at your next prompt` |
   | open in your terminal, or held by Relay | Relay's hooks: each prompt carries a line saying mail waits, and the end of a turn keeps it going to read it | nothing more |
 
-  Carrying a Claude on starts a new background session on the same conversation: the list shows it
-  under a new id, with the name you gave the old one, and the old one as ended. Where it could not,
-  `send` says why and, from another Claude, how to wake it with Claude's own `SendMessage`.
+  Carrying a Claude on starts a new background session on the same conversation, under a new id:
+  Relay moves your name, pin, colour and place for the old row to the new one and hides the old
+  (`ctrl+o` shows it; nothing is removed), and mail for the old one, or sent to it later, reaches
+  the new one. Where it could not wake it, `send` says why and, from another Claude, how to wake
+  it with Claude's own `SendMessage`.
 - **Gemini, Antigravity and the rest** find it when they call `inbox`; ask them to.
 
 Replies are messages too: an agent that wants an answer asks for one. Relay never types into a
