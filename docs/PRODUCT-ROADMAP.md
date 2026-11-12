@@ -12,6 +12,17 @@ report arc, the briefer, the co-worker layer, notifications, the pane redesign �
 
 ## Open
 
+From a Codex review of the repo (2026-11-12, `docs/what-to-improve.md`):
+
+* [ ] prove live compatibility — a repeatable check against the real Claude and Codex (screen
+  markers for typing, listing formats, attach/stop/rm/archive/queue), and a supported-version
+  matrix
+* [ ] mail delivery recoverable — messages kept after `inbox` until the reply is written, a
+  `recent` re-read (in progress)
+* [ ] a slow harness doesn't hold up the others — listers run and publish independently, in the
+  list and in `rl mcp` (in progress)
+* [x] attach and typing never overlap — an attach waits for a line being typed in (#215)
+
 What the slim build left to check or finish:
 
 * [ ] verify live what's left: carrying on an idle Claude from another terminal
@@ -36,6 +47,16 @@ Later:
 
 ## Done — newest first
 
+* [x] rename reaches the harness — Codex by `thread/name/set`, an idle Claude by `/rename` typed
+  in; Relay mail wakes an idle Claude (a line typed in) or carries on a stopped one
+  (`--resume --bg`); attaches wait for typing (#215)
+* [x] rename starts with the name selected; ctrl+x twice asks — stop, or remove (`claude rm`) /
+  archive (`codex archive`) (#214)
+* [x] `rl setup` is a six-step inline wizard — enter walks through, tab just gets you there; a tick
+  box per change, declines remembered (#213)
+* [x] the list scrolls fast (built once per change, input in bursts, no hover select); ← in an
+  attached Claude goes back to the list; setup turns off Claude's ← shortcut (#212)
+* [x] Relay for others — `scripts/install`, README with demo screenshots, a messaging guide (#211)
 * [x] Codex runs in its own daemon — `codex <prompt>` starts the thread and its first turn on
   Codex's app-server (no holder), enter is `codex resume`, `/stop` interrupts the turn, unloaded
   idle threads stay as resting rows; one `Harness` trait (Claude, Codex, Held) replaces `Adapter`
