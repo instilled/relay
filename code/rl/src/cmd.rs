@@ -110,8 +110,7 @@ async fn new_own(a: &'static dyn Harness, cwd: &Path, name_only: bool, words: &[
 
 /// What stops and removes the sessions Relay holds, for their harnesses
 /// (`Harness::stop`, `Harness::remove`): this store, from a session's
-/// folder (`<home>/sessions/<name>`). Asked off the list's loop, from a
-/// blocking task.
+/// folder (`<home>/sessions/<name>`). Safe to ask from any thread (`block`).
 pub struct Store;
 
 impl rl_detect::harness::Holder for Store {
@@ -134,16 +133,20 @@ fn home_of(dir: &Path) -> Result<Home> {
         .with_context(|| format!("{} is not a session's folder", dir.display()))
 }
 
-/// `f` run to its end from a blocking task: on its runtime, else one of its
-/// own.
-fn block<T>(f: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(h) => h.block_on(f),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(f),
-    }
+/// `f` run to its end on a runtime of its own, on a thread of its own: safe
+/// from anywhere, a runtime's worker included (where `Handle::block_on`
+/// would panic), whichever runtime the caller is on.
+fn block<T: Send>(f: impl std::future::Future<Output = Result<T>> + Send) -> Result<T> {
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(f)
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("the held session's stop panicked"))?
+    })
 }
 
 /// The caller's terminal when it is one, else a default.
