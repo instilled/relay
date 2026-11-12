@@ -89,7 +89,8 @@ A socket path over the OS limit (about 100 bytes) goes under `$TMPDIR/rl-<uid>-<
 - **Stop and remove.** The second `ctrl+x` puts one question in the footer for every harness
   (`tui::remove::Ask`): `s stop` while it runs, `r remove`, `enter` the first offered. A row no
   harness can remove is hidden instead. Per harness (`remove::Target`): a held stop marks `stopped`
-  and closes the holder, a held remove stops it then removes its folder (`cmd::rm`); a native one's
+  and closes the holder (SIGHUP, 3 s; then SIGTERM, 2 s; then SIGKILL, so it always ends, its exit
+  written within the 10 s `rl stop` waits), a held remove stops it then removes its folder (`cmd::rm`); a native one's
   are `Harness::stop` / `Harness::remove`. A refusal's stderr (`harness::said`) stands in the footer
   and the row stays. `/rm` asks the remove alone; `/stop` stops at once.
 - **Rename.** The name goes into `config.json`'s `names`; where the harness `renames` the row, the

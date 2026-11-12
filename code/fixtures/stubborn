@@ -1,0 +1,7 @@
+#!/bin/sh
+# A run that will not go on a hangup or a terminate: only a kill ends it.
+trap '' HUP TERM
+echo "stubborn ready"
+while :; do
+  sleep 0.2
+done
