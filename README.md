@@ -62,8 +62,8 @@ Claude's background sessions and Codex's threads are on it as their own tools sh
 agents in other terminals are on it through their hooks. `/project <folder>` adds a project with
 nothing running in it yet; the cursor lands on it, so typing starts something there.
 
-`enter` attaches; `ctrl+\` detaches and leaves it running. In an attached Claude, `←` on an empty
-prompt also comes back to the list. A session Relay holds lives in a small process of its own
+`enter` attaches; `ctrl+\` detaches and leaves it running (from a Claude or Codex session of
+their own, their own detach or quit brings you back). A session Relay holds lives in a small process of its own
 (`rl-session`), so closing the terminal or the laptop costs nothing.
 
 **Start by typing.** The line at the bottom starts things in the folder of the row under the cursor:
@@ -144,9 +144,10 @@ nothing.
 | `/help` | the keys |
 | `/quit` | quit |
 
-A rename reaches the harness where it can: a Codex thread is renamed on its daemon, an idle Claude
-has `/rename` typed into it. Otherwise (a busy or attached Claude, a hooked session) the name is
-Relay's, shown with the harness's own dim beside it; search finds both. An empty name goes back to
+A rename reaches the harness where it can: a Codex thread is renamed on its daemon at once; a
+Claude background session takes it the next time Relay starts it (carrying it on, or waking it for
+mail). Otherwise (a hooked session, a held one) the name is Relay's, shown with the harness's own
+dim beside it; search finds both. An empty name goes back to
 the harness's own.
 
 ### Codex
@@ -167,8 +168,8 @@ plain words:
 
 > when the tests pass, tell the claude session "web" to rebase on main
 
-Codex is pinged when mail arrives; an idle Claude background session is woken to read it, a busy
-one hears of it through its hooks; the others read it when they call `inbox`. The
+Codex is pinged when mail arrives; an idle Claude background session is woken to read it (stopped
+and carried on with the message as its prompt), a busy one hears of it through its hooks; the others read it when they call `inbox`. The
 [messaging guide](docs/messaging.md) has how it works and more use cases.
 
 ## From the shell
@@ -211,14 +212,15 @@ conversation content is kept.
 
 ## Known limits
 
-- Typing into an idle Claude (a rename, a wake for mail) reads Claude's screen through a hidden
-  `claude attach`, as Claude 2.1.322 drew it; a Claude that draws it otherwise is left alone and
-  Relay says why.
+- Relay never reads a harness's screen to act or types into one: it uses only what a harness
+  documents (its CLI, `claude agents --json`, Codex's app-server, the hooks). So a Claude is renamed
+  only when Relay next starts it, and waking an idle Claude for mail carries its conversation on in a
+  new background session (a new id; the old one stays listed as ended).
 - `rl mcp` in Codex can't tell which thread called it: a Codex caller passes `from`/`as` itself.
 - Antigravity has no hooks or screen patterns yet, so its state is a guess.
 - A Codex thread started with bare `codex` is listed only while the daemon has it loaded.
-- Not run live yet: `claude rm`, Codex's `turn/interrupt` and `thread/delete`, starting the Codex
-  daemon, the Gemini MCP entry, and `←` in a `claude attach` opening the agents view.
+- Not run live yet: Codex's `turn/interrupt` and `thread/delete`, starting the Codex daemon, and
+  the Gemini MCP entry.
 
 ## Docs
 

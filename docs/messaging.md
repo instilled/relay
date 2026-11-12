@@ -23,18 +23,20 @@ the recipient learns of it depends on its harness:
 
   | the Claude session | how it learns | `send` says |
   | --- | --- | --- |
-  | in Claude's background, idle | Relay types `relay mail from <you>: call the relay inbox tool to read it` into it, through a hidden `claude attach` | `· woke claude` |
-  | in Claude's background, stopped or ended | carried on in the background with that line as its prompt (`claude --resume … --bg`) | `· resumed claude` |
-  | working, or waiting on you | Relay's hooks: at the end of its turn it is kept going one more turn to read the mail | `· claude is busy; it will see it at the end of its turn` |
+  | in Claude's background, idle | stopped (`claude stop`) and carried on in the background with `relay mail from <you>: call the relay inbox tool to read it` as its prompt (`claude --resume … --bg`) | `· woke claude` |
+  | in Claude's background, ended | carried on the same way | `· woke claude` |
+  | in Claude's background, working | Relay's hooks: at the end of its turn it is kept going one more turn to read the mail | `· claude is busy; it will see it at the end of its turn` |
+  | in Claude's background, waiting on you | Relay's hooks, once you answer | `· claude waits on you; it will see it once you answer` |
+  | attached from the list | Relay's hooks, at your next prompt | `· you are attached to it; it will see it at your next prompt` |
   | open in your terminal, or held by Relay | Relay's hooks: each prompt carries a line saying mail waits, and the end of a turn keeps it going to read it | nothing more |
 
-  Relay types only when the screen shows an empty prompt and nothing running, and never while you
-  are attached to it from the list. Where it could not, `send` says why and, from another Claude,
-  how to wake it with Claude's own `SendMessage`.
+  Carrying a Claude on starts a new background session on the same conversation: the list shows it
+  under a new id, with the name you gave the old one, and the old one as ended. Where it could not,
+  `send` says why and, from another Claude, how to wake it with Claude's own `SendMessage`.
 - **Gemini, Antigravity and the rest** find it when they call `inbox`; ask them to.
 
-Replies are messages too: an agent that wants an answer asks for one. Nothing is typed into a
-terminal you are using.
+Replies are messages too: an agent that wants an answer asks for one. Relay never types into a
+session or reads its screen: it uses only the harness's documented commands and its hooks.
 
 The sender is known automatically in a session Relay holds and in Claude. A Codex agent passes its
 own address (`from`, `as`): tell it which row it is if it asks.
