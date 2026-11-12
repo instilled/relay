@@ -187,39 +187,21 @@ impl StandIn {
     fn begin(&self, argv: &[String], cwd: &std::path::Path, before: &HashSet<String>) -> anyhow::Result<String> {
         STARTED.lock().unwrap().push(cwd.to_path_buf());
         rl_detect::claude_native::begin(
-            |w| rl_detect::harness::Steps::list_within(self, w),
+            |_| Ok(self.listed()),
             argv,
             cwd,
             before,
             rl_detect::claude_native::LISTED_WAIT,
         )
     }
-}
 
-#[cfg(test)]
-impl rl_detect::harness::Steps for StandIn {
-    fn profile(&self) -> &rl_detect::Profile {
-        self.inner.profile()
-    }
-
-    fn bin(&self) -> &str {
-        self.inner.bin()
-    }
-
-    fn found(&self) -> bool {
-        self.inner.found()
-    }
-
-    fn lists(&self) -> bool {
-        self.inner.lists()
-    }
-
-    fn list_within(&self, _: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
+    /// What it lists: what Claude started, working, in each folder.
+    fn listed(&self) -> Vec<NativeRow> {
         let started = STARTED.lock().unwrap();
-        Ok(started
+        started
             .iter()
             .map(|cwd| NativeRow {
-                harness: rl_detect::harness::Steps::name(self).into(),
+                harness: self.inner.info().name.clone(),
                 id: "0a1b2c3d".into(),
                 session_id: "s-0a1b2c3d".into(),
                 name: "started".into(),
@@ -235,95 +217,7 @@ impl rl_detect::harness::Steps for StandIn {
                 pr: None,
                 color: None,
             })
-            .collect())
-    }
-
-    fn start_in(
-        &self,
-        cwd: &std::path::Path,
-        name: Option<&str>,
-        prompt: Option<&str>,
-        before: &HashSet<String>,
-    ) -> anyhow::Result<rl_detect::harness::Started> {
-        match self.claude.as_ref().and_then(|c| c.start_argv(name, prompt)) {
-            Some(argv) => self
-                .begin(&argv, cwd, before)
-                .map(rl_detect::harness::Started::Background),
-            None => rl_detect::harness::Steps::start_in(self.inner.as_ref(), cwd, name, prompt, before),
-        }
-    }
-
-    fn never_held(&self) -> bool {
-        self.inner.never_held()
-    }
-
-    fn held_argv(
-        &self,
-        home: &rl_core::Home,
-        argv: Vec<String>,
-        rl: &dyn Fn() -> anyhow::Result<PathBuf>,
-    ) -> anyhow::Result<Vec<String>> {
-        self.inner.held_argv(home, argv, rl)
-    }
-
-    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
-        self.inner.attach_argv(id)
-    }
-
-    fn carry_on(&self, session_id: &str) -> Option<rl_detect::harness::CarryOn> {
-        self.inner.carry_on(session_id)
-    }
-
-    fn carry_on_there(
-        &self,
-        argv: &[String],
-        cwd: &std::path::Path,
-        before: &HashSet<String>,
-    ) -> anyhow::Result<String> {
-        self.begin(argv, cwd, before)
-    }
-
-    fn stops(&self, row: &NativeRow) -> bool {
-        self.inner.stops(row)
-    }
-
-    fn stop_id(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
-        rl_detect::harness::Steps::stop_id(self.inner.as_ref(), id, cwd)
-    }
-
-    fn removes(&self, row: &NativeRow) -> bool {
-        self.inner.removes(row)
-    }
-
-    fn remove_id(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
-        rl_detect::harness::Steps::remove_id(self.inner.as_ref(), id, cwd)
-    }
-
-    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
-        self.inner.ping_argv(id, text)
-    }
-
-    fn user_hooks(&self) -> Option<&rl_detect::sessions::UserHooks> {
-        self.inner.user_hooks()
-    }
-
-    fn has_mcp(&self) -> bool {
-        self.inner.has_mcp()
-    }
-
-    fn mcp(
-        &self,
-        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
-    ) -> anyhow::Result<Option<rl_detect::mcp_entry::Place>> {
-        self.inner.mcp(env)
-    }
-
-    fn caller_id_var(&self) -> Option<&'static str> {
-        self.inner.caller_id_var()
-    }
-
-    fn mail_by_hooks(&self) -> bool {
-        self.inner.mail_by_hooks()
+            .collect()
     }
 }
 
@@ -333,8 +227,8 @@ impl Harness for StandIn {
         self.inner.info()
     }
 
-    fn sessions(&self, wait: std::time::Duration) -> rl_detect::harness::Listed {
-        rl_detect::harness::Steps::list_within(self, wait).into()
+    fn sessions(&self, _: std::time::Duration) -> rl_detect::harness::Listed {
+        rl_detect::harness::Listed::Rows(self.listed())
     }
 
     /// Claude's start, run on the stand-in and listed by it; the rest the
@@ -739,7 +633,7 @@ mod tests {
 
     /// The rows, every harness having answered.
     fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Row> {
-        let all = harnesses().iter().map(|h| h.name().to_string()).collect();
+        let all = harnesses().iter().map(|h| h.info().name.clone()).collect();
         super::rows(held, hooked, native, &all)
     }
 
@@ -912,11 +806,6 @@ mod tests {
             panic!("{:?}", r.attach);
         };
         assert_eq!(start.resume.as_deref(), Some("0123456789"));
-        let claude = harness("claude").unwrap();
-        let Some(rl_detect::harness::CarryOn::Background(argv)) = claude.carry_on("0123456789") else {
-            panic!("in its background");
-        };
-        assert_eq!(argv[1..], ["--resume", "0123456789", "--bg"]);
         // Gemini has none: Relay holds it.
         let r = rows(&[], &[hook("gemini", "g-1", Said::Idle, None)], &[]).remove(0);
         let Attach::CarryOn(start) = &r.attach else {

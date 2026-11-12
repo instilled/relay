@@ -23,15 +23,14 @@
 use crate::Registry;
 use crate::mcp_entry::{How, Place};
 use crate::registry::{Profile, find_bin};
-use crate::sessions::{ID, TEXT, UserHooks};
-use crate::settings;
+use crate::sessions::{ID, TEXT};
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use rl_core::Home;
 use rl_core::state::{RunKind, RunState};
-use std::collections::HashSet;
+
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -101,200 +100,6 @@ pub enum Started {
     Held(Vec<String>),
 }
 
-/// How a conversation open in another terminal carries on, once it rests
-/// there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CarryOn {
-    /// This, run in the harness's own background (`Harness::carry_on_there`).
-    Background(Vec<String>),
-    /// This, in a session Relay holds.
-    Held(Vec<String>),
-    /// This, run here: the conversation is in the harness's background
-    /// already (Codex's thread on its daemon).
-    Attach(Vec<String>),
-}
-
-/// The steps each harness binds behind its intents (`Harness`): what it
-/// runs, one by one. Only the implementations call them.
-pub trait Steps: Send + Sync {
-    /// Its profile.
-    fn profile(&self) -> &Profile;
-    /// The binary it runs: the one found on this machine, else its
-    /// profile's first.
-    fn bin(&self) -> &str;
-    /// Whether its binary is on this machine.
-    fn found(&self) -> bool;
-    /// Its name: `claude`.
-    fn name(&self) -> &str {
-        &self.profile().name
-    }
-    /// What its sessions are: agents, shells, commands.
-    fn kind(&self) -> RunKind {
-        self.profile().kind
-    }
-
-    // Its own sessions.
-
-    /// Whether it lists sessions of its own (it has a background).
-    fn lists(&self) -> bool {
-        false
-    }
-    /// Its background sessions, as it lists them.
-    fn list(&self) -> Result<Vec<NativeRow>> {
-        self.list_within(LIST_WAIT)
-    }
-    /// The same, for no longer than `wait`. None but its own: empty.
-    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
-        let _ = wait;
-        Ok(Vec::new())
-    }
-    /// Starts a session of it in `cwd`, named and prompted if given: what it
-    /// began. `before`: the ids its last listing had, which the new one is
-    /// not. Without a background of its own: `Started::Held`, its profile's
-    /// prompt arguments, for Relay to hold.
-    fn start_in(
-        &self,
-        cwd: &Path,
-        name: Option<&str>,
-        prompt: Option<&str>,
-        before: &HashSet<String>,
-    ) -> Result<Started> {
-        let _ = (cwd, name, before);
-        Ok(Started::Held(self.profile().prompt_args(prompt.unwrap_or(""))))
-    }
-    /// Whether Relay never holds a session of it: what starts one starts it
-    /// in its background or in this terminal (Codex: its daemon runs every
-    /// thread).
-    fn never_held(&self) -> bool {
-        false
-    }
-    /// What a session of it Relay holds runs, from `argv` (its binary and
-    /// arguments): with the hooks its profile's `hooks` says it reports
-    /// through (`claude --settings <file>`), the file written under `home`
-    /// for `rl` (asked only then).
-    fn held_argv(&self, home: &Home, argv: Vec<String>, rl: &dyn Fn() -> Result<PathBuf>) -> Result<Vec<String>> {
-        held_argv(self.profile(), home, argv, rl)
-    }
-    /// What attaches this terminal to its session `id`. None: it has none
-    /// of its own.
-    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
-        let _ = id;
-        None
-    }
-    /// How its conversation `session_id`, open in another terminal, carries
-    /// on: by default its profile's `resume`, held by Relay. None: no way.
-    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
-        self.profile()
-            .resume_argv(self.bin().to_string(), session_id)
-            .map(CarryOn::Held)
-    }
-    /// Runs `argv`, a `CarryOn::Background`, in `cwd`: the id of the session
-    /// it began there.
-    fn carry_on_there(&self, argv: &[String], cwd: &Path, before: &HashSet<String>) -> Result<String> {
-        let _ = (argv, cwd, before);
-        bail!("{} carries nothing on in its background", self.name())
-    }
-    /// Whether `stop` would stop `row`, as it stands.
-    fn stops(&self, row: &NativeRow) -> bool {
-        let _ = row;
-        false
-    }
-    /// Stops its session `id`, in `cwd` (Claude: `claude stop`; Codex:
-    /// interrupts its running turn).
-    fn stop_id(&self, id: &str, cwd: &Path) -> Result<()> {
-        let _ = (id, cwd);
-        bail!("nothing stops a {} session from here", self.name())
-    }
-    /// Whether `remove` would delete `row` for good: by default, where its
-    /// profile has `sessions.remove`.
-    fn removes(&self, row: &NativeRow) -> bool {
-        let _ = row;
-        self.profile().sessions.as_ref().is_some_and(|s| !s.remove.is_empty())
-    }
-    /// Deletes its session `id` for good, in `cwd`: its profile's
-    /// `sessions.remove` arguments run with its binary (`claude rm <id>`),
-    /// for no longer than a list may take. Where it refuses, the error is
-    /// what it said, as it said it (Claude's unpushed commits).
-    fn remove_id(&self, id: &str, cwd: &Path) -> Result<()> {
-        let Some(s) = self.profile().sessions.as_ref().filter(|s| !s.remove.is_empty()) else {
-            bail!("nothing removes a {} session from here", self.name());
-        };
-        let argv: Vec<String> = std::iter::once(self.bin().to_string())
-            .chain(s.remove.iter().map(|a| a.replace(ID, id)))
-            .collect();
-        run(&argv, Some(cwd), false, LIST_WAIT).map(drop).map_err(said)
-    }
-    /// What tells its session `id` `text` from outside it: its profile's
-    /// `sessions.ping` (codex: queues it on the thread). None: nothing
-    /// outside it can.
-    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
-        let ping = &self.profile().sessions.as_ref()?.ping;
-        if ping.is_empty() {
-            return None;
-        }
-        let args = ping.iter().map(|a| a.replace(ID, id).replace(TEXT, text));
-        Some(std::iter::once(self.bin().to_string()).chain(args).collect())
-    }
-
-    // Setup.
-
-    /// The hooks that tell of its own sessions, set in its user-level file
-    /// by `rl setup` (its profile's `sessions.hooks`).
-    fn user_hooks(&self) -> Option<&UserHooks> {
-        self.profile().sessions.as_ref()?.hooks.as_ref()
-    }
-    /// Whether it has a place for Relay's MCP server (its profile's `mcp`).
-    fn has_mcp(&self) -> bool {
-        self.profile().mcp.is_some()
-    }
-    /// Where Relay's MCP server goes for it, and how, as `env` finds its
-    /// file; None where it has no place. An error where its file is not
-    /// known (`HOME` not set). Without a harness of its own: written into
-    /// its profile's `mcp` file, or through its CLI's `mcp.cli` words.
-    fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
-        let how = match self.profile().mcp.as_ref() {
-            Some(m) if !m.cli.is_empty() => How::Cli {
-                cli: cli_name(self),
-                bin: self.found().then(|| PathBuf::from(self.bin())),
-                words: m.cli.clone(),
-            },
-            _ => How::Json,
-        };
-        mcp_place(self, env, how)
-    }
-
-    /// Where the keys `rl setup` sets in its own global config go, and
-    /// which (its profile's `settings`); None where it has none. An error
-    /// where its file is not known (`HOME` not set).
-    fn settings(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<settings::Place>> {
-        let Some(s) = self.profile().settings.as_ref() else {
-            return Ok(None);
-        };
-        let name = self.name();
-        let path = s
-            .file(env)
-            .ok_or_else(|| anyhow!("{name}: HOME is not set, so where its global config is is not known"))?;
-        Ok(Some(settings::Place {
-            path,
-            set: s.set.clone(),
-        }))
-    }
-
-    // Mail and `rl mcp`.
-
-    /// The variable its sessions set to their conversation's id, which its
-    /// hooks tell of too: how `rl mcp` knows a caller Relay does not hold
-    /// (`CLAUDE_CODE_SESSION_ID`).
-    fn caller_id_var(&self) -> Option<&'static str> {
-        None
-    }
-    /// Whether its sessions hear of relay mail from its hooks (`rl hook`'s
-    /// news): it has no way in from outside (Claude).
-    fn mail_by_hooks(&self) -> bool {
-        false
-    }
-}
-
 /// What a session of `profile` that Relay holds runs, from `argv` (its
 /// binary and arguments, `Started::Held`'s after the binary): with the hooks
 /// its profile's `hooks` says it reports through (`claude --settings
@@ -321,25 +126,17 @@ pub fn held_argv(
 }
 
 /// The name its own CLI goes by: its profile's first binary.
-pub(crate) fn cli_name(h: &(impl Steps + ?Sized)) -> String {
-    h.profile()
-        .bins
-        .first()
-        .cloned()
-        .unwrap_or_else(|| h.name().to_string())
+pub(crate) fn cli_name(p: &Profile) -> String {
+    p.bins.first().cloned().unwrap_or_else(|| p.name.clone())
 }
 
 /// Its MCP place, `how`, in the file its profile's `mcp` names as `env`
 /// finds it; None where its profile names none.
-pub(crate) fn mcp_place(
-    h: &(impl Steps + ?Sized),
-    env: &dyn Fn(&str) -> Option<OsString>,
-    how: How,
-) -> Result<Option<Place>> {
-    let Some(m) = h.profile().mcp.as_ref() else {
+pub(crate) fn mcp_place(p: &Profile, env: &dyn Fn(&str) -> Option<OsString>, how: How) -> Result<Option<Place>> {
+    let Some(m) = p.mcp.as_ref() else {
         return Ok(None);
     };
-    let name = h.name();
+    let name = &p.name;
     let path = m
         .file(env)
         .ok_or_else(|| anyhow!("{name}: HOME is not set, so where its MCP servers are kept is not known"))?;
@@ -349,6 +146,32 @@ pub(crate) fn mcp_place(
         how,
         note: m.note.clone(),
     }))
+}
+
+/// What tells its session `id` `text` from outside it: its profile's
+/// `sessions.ping`, run with `bin` (codex: queues it on the thread). None:
+/// nothing outside it can.
+pub(crate) fn ping_argv(p: &Profile, bin: &str, id: &str, text: &str) -> Option<Vec<String>> {
+    let ping = &p.sessions.as_ref()?.ping;
+    if ping.is_empty() {
+        return None;
+    }
+    let args = ping.iter().map(|a| a.replace(ID, id).replace(TEXT, text));
+    Some(std::iter::once(bin.to_string()).chain(args).collect())
+}
+
+/// Deletes its session `id` for good, in `cwd`: its profile's
+/// `sessions.remove` arguments run with `bin` (`claude rm <id>`), for no
+/// longer than a list may take. Where it refuses, the error is what it
+/// said, as it said it (Claude's unpushed commits).
+pub(crate) fn remove_id(p: &Profile, bin: &str, id: &str, cwd: &Path) -> Result<()> {
+    let Some(s) = p.sessions.as_ref().filter(|s| !s.remove.is_empty()) else {
+        bail!("nothing removes a {} session from here", p.name);
+    };
+    let argv: Vec<String> = std::iter::once(bin.to_string())
+        .chain(s.remove.iter().map(|a| a.replace(ID, id)))
+        .collect();
+    run(&argv, Some(cwd), false, LIST_WAIT).map(drop).map_err(said)
 }
 
 // ---- The intents ---------------------------------------------------------
@@ -651,7 +474,7 @@ fn holder() -> Result<std::sync::Arc<dyn Holder>> {
 /// its own steps behind them, and a caller shows what came of one.
 /// `sessions`, `start`, `stop`, `remove`, `rename`, `notify` and `check`
 /// may run the harness and block; they are asked from a background task.
-pub trait Harness: Steps {
+pub trait Harness: Send + Sync {
     fn info(&self) -> &Info;
     /// Its own sessions, for no longer than `wait`: none for one Relay
     /// holds.
@@ -691,8 +514,7 @@ pub(crate) mod held {
     }
 
     /// One Relay holds: `Started::Held` with its profile's arguments.
-    pub fn start(h: &(impl Steps + ?Sized), s: &Start) -> Result<Started> {
-        let p = h.profile();
+    pub fn start(p: &Profile, s: &Start) -> Result<Started> {
         if let Some(words) = &s.words {
             return Ok(Started::Held(words.clone()));
         }
@@ -707,16 +529,14 @@ pub(crate) mod held {
 
     /// A held one: Relay's attach. One elsewhere, at rest: carried on in a
     /// session Relay holds, where its profile says how.
-    pub fn attach(h: &(impl Steps + ?Sized), s: &Session) -> Attach {
+    pub fn attach(p: &Profile, s: &Session) -> Attach {
         match &s.owner {
             Owner::Relay { .. } => Attach::Held,
-            Owner::Elsewhere { .. } if s.state == RunState::Idle && !h.profile().resume.is_empty() => {
-                Attach::CarryOn(Start {
-                    cwd: s.cwd.clone(),
-                    resume: Some(s.session_id.clone()),
-                    ..Start::default()
-                })
-            }
+            Owner::Elsewhere { .. } if s.state == RunState::Idle && !p.resume.is_empty() => Attach::CarryOn(Start {
+                cwd: s.cwd.clone(),
+                resume: Some(s.session_id.clone()),
+                ..Start::default()
+            }),
             _ => Attach::No,
         }
     }
@@ -754,13 +574,13 @@ pub(crate) mod held {
 
     /// Mail is queued on it where its profile has a way in from outside
     /// (`sessions.ping`); else it sees it at its next inbox.
-    pub fn notify(h: &(impl Steps + ?Sized), s: &Session, mail: &Mail) -> Notified {
+    pub fn notify(p: &Profile, bin: &str, s: &Session, mail: &Mail) -> Notified {
         // A held one by its conversation's id, as its hooks said it.
         let id = match s.owner {
             Owner::Relay { .. } => &s.session_id,
             _ => &s.id,
         };
-        let Some(argv) = h.ping_argv(id, &mail.line()).filter(|_| !id.is_empty()) else {
+        let Some(argv) = ping_argv(p, bin, id, &mail.line()).filter(|_| !id.is_empty()) else {
             return Notified::AtNextInbox;
         };
         // Asking: the harness's own hooks let a run of Relay's go.
@@ -772,23 +592,19 @@ pub(crate) mod held {
 
     /// Its hooks, its MCP server, its settings, as its profile says; its
     /// MCP server through `how`.
-    pub fn setup(
-        h: &(impl Steps + ?Sized),
-        env: &dyn Fn(&str) -> Option<OsString>,
-        how: How,
-    ) -> Result<Vec<crate::setup::Part>> {
-        let p = h.profile();
-        let mcp = mcp_place(h, env, how)?;
-        crate::setup::parts(&p.name, h.user_hooks(), mcp, p.settings.as_ref(), env)
+    pub fn setup(p: &Profile, env: &dyn Fn(&str) -> Option<OsString>, how: How) -> Result<Vec<crate::setup::Part>> {
+        let mcp = mcp_place(p, env, how)?;
+        let hooks = p.sessions.as_ref().and_then(|s| s.hooks.as_ref());
+        crate::setup::parts(&p.name, hooks, mcp, p.settings.as_ref(), env)
     }
 
     /// Written into its profile's `mcp` file, or through its CLI's `mcp.cli`
     /// words.
-    pub fn mcp_how(h: &(impl Steps + ?Sized)) -> How {
-        match h.profile().mcp.as_ref() {
+    pub fn mcp_how(p: &Profile, bin: &str, found: bool) -> How {
+        match p.mcp.as_ref() {
             Some(m) if !m.cli.is_empty() => How::Cli {
-                cli: cli_name(h),
-                bin: h.found().then(|| PathBuf::from(h.bin())),
+                cli: cli_name(p),
+                bin: found.then(|| PathBuf::from(bin)),
                 words: m.cli.clone(),
             },
             _ => How::Json,
@@ -810,11 +626,11 @@ impl Harness for Held {
     }
 
     fn start(&self, s: &Start) -> Result<Started> {
-        held::start(self, s)
+        held::start(&self.profile, s)
     }
 
     fn attach(&self, s: &Session) -> Attach {
-        held::attach(self, s)
+        held::attach(&self.profile, s)
     }
 
     fn actions(&self, s: &Session) -> Actions {
@@ -834,11 +650,12 @@ impl Harness for Held {
     }
 
     fn notify(&self, s: &Session, mail: &Mail) -> Notified {
-        held::notify(self, s, mail)
+        held::notify(&self.profile, &self.info.bin, s, mail)
     }
 
     fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>> {
-        held::setup(self, env, held::mcp_how(self))
+        let how = held::mcp_how(&self.profile, &self.info.bin, self.info.found);
+        held::setup(&self.profile, env, how)
     }
 
     fn caller(&self, _: &dyn Fn(&str) -> Option<String>) -> Option<String> {
@@ -858,23 +675,7 @@ impl Harness for Held {
 #[derive(Debug, Clone)]
 pub struct Held {
     profile: Profile,
-    bin: String,
-    found: bool,
     info: Info,
-}
-
-impl Steps for Held {
-    fn profile(&self) -> &Profile {
-        &self.profile
-    }
-
-    fn bin(&self) -> &str {
-        &self.bin
-    }
-
-    fn found(&self) -> bool {
-        self.found
-    }
 }
 
 /// How long a list may take.
@@ -910,12 +711,9 @@ pub fn of(profile: &Profile, found: Option<PathBuf>) -> Box<dyn Harness> {
         _ => None,
     };
     own.unwrap_or_else(|| {
-        let bin = bin.to_string_lossy().into_owned();
         Box::new(Held {
-            info: held::info(profile, &bin, here),
+            info: held::info(profile, &bin.to_string_lossy(), here),
             profile: profile.clone(),
-            bin,
-            found: here,
         })
     })
 }
@@ -1208,41 +1006,63 @@ mod tests {
     }
 
     #[test]
-    fn claudes_and_codexs_profiles_have_a_background_and_the_rest_are_held() {
+    fn the_held_list_nothing_of_their_own_and_relay_holds_what_they_start() {
         let all = harnesses(&Registry::builtin(), |_| None);
-        let names: Vec<&str> = all.iter().filter(|h| h.lists()).map(|h| h.name()).collect();
-        assert_eq!(names, ["claude", "codex"]);
-        let gemini = all.iter().find(|h| h.name() == "gemini").unwrap();
+        let get = |n: &str| all.iter().find(|h| h.info().name == n).unwrap();
+        for h in all
+            .iter()
+            .filter(|h| !["claude", "codex"].contains(&h.info().name.as_str()))
+        {
+            assert_eq!(h.sessions(LIST_WAIT), Listed::Rows(Vec::new()), "{}", h.info().name);
+        }
+        let gemini = get("gemini");
         assert!(
-            !gemini.found() && gemini.bin() == "gemini",
+            !gemini.info().found && gemini.info().bin == "gemini",
             "its first binary, not here"
         );
         assert_eq!(
-            Harness::start(
-                gemini.as_ref(),
-                &Start {
+            gemini
+                .start(&Start {
                     cwd: "/w".into(),
                     prompt: Some("fix it".into()),
                     ..Start::default()
-                }
-            )
-            .unwrap(),
+                })
+                .unwrap(),
             Started::Held(vec!["fix it".into()]),
             "Relay holds it"
         );
+        let env = |k: &str| (k == "HOME").then(|| OsString::from("/h"));
+        assert!(!gemini.setup(&env).unwrap().is_empty(), "its hooks and its server");
+        let sh = get("sh");
+        let elsewhere = Session {
+            harness: "sh".into(),
+            owner: Owner::Elsewhere { listed: true },
+            id: "x".into(),
+            session_id: "x".into(),
+            cwd: "/w".into(),
+            state: RunState::Idle,
+            words: String::new(),
+            name: String::new(),
+            relay_name: None,
+            attached: false,
+        };
+        assert!(sh.setup(&env).unwrap().is_empty());
+        assert_eq!(sh.attach(&elsewhere), Attach::No, "no way to carry one on");
+        let mail = Mail {
+            from: "a".into(),
+            from_harness: "sh".into(),
+        };
         assert_eq!(
-            gemini.carry_on("g-1"),
-            Some(CarryOn::Held(vec!["gemini".into(), "--resume".into(), "g-1".into()]))
+            sh.notify(&elsewhere, &mail),
+            Notified::AtNextInbox,
+            "no way in from outside"
         );
-        assert!(gemini.has_mcp() && gemini.user_hooks().is_some());
-        let sh = all.iter().find(|h| h.name() == "sh").unwrap();
-        assert!(!sh.has_mcp() && sh.carry_on("x").is_none() && sh.ping_argv("x", "y").is_none());
     }
 
     #[test]
     fn claude_and_codex_remove_for_good_and_the_held_have_no_remove_of_their_own() {
         let all = harnesses(&Registry::builtin(), |_| None);
-        let get = |n: &str| all.iter().find(|h| h.name() == n).unwrap();
+        let get = |n: &str| all.iter().find(|h| h.info().name == n).unwrap();
         let row = NativeRow {
             harness: "claude".into(),
             id: "ab12cd34".into(),
@@ -1260,10 +1080,15 @@ mod tests {
             pr: None,
             color: None,
         };
-        assert!(get("claude").removes(&row));
-        assert!(get("codex").removes(&row), "thread/delete");
-        assert!(!get("antigravity").removes(&row), "held: Relay removes its own");
-        let e = Steps::remove_id(get("gemini").as_ref(), "x", Path::new("/")).unwrap_err();
+        let own = Session::own(&row);
+        assert!(get("claude").actions(&own).remove);
+        assert!(get("codex").actions(&own).remove, "thread/delete");
+        assert!(!get("antigravity").actions(&own).remove, "held: Relay removes its own");
+        let theirs = Session {
+            harness: "gemini".into(),
+            ..own
+        };
+        let e = get("gemini").remove(&theirs).unwrap_err();
         assert_eq!(e.to_string(), "nothing removes a gemini session from here");
     }
 
@@ -1279,7 +1104,8 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let h = of(Registry::builtin().profile("claude").unwrap(), Some(bin));
-        Steps::remove_id(h.as_ref(), "ab12cd34", tmp.path()).unwrap();
+        let own = Session::started("claude", "ab12cd34", tmp.path());
+        h.remove(&own).unwrap();
         let said = std::fs::read_to_string(tmp.path().join("said")).unwrap();
         let here = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(
@@ -1290,7 +1116,7 @@ mod tests {
         let refusal =
             "ab12cd34 has 2 unpushed commits in worktree w-1\nrerun with --discard-unpushed 9f1e@w-1 to discard them";
         std::fs::write(tmp.path().join("refuse"), format!("{refusal}\n")).unwrap();
-        let e = Steps::remove_id(h.as_ref(), "ab12cd34", tmp.path()).unwrap_err();
+        let e = h.remove(&own).unwrap_err();
         assert_eq!(e.to_string(), refusal, "every line, as said");
     }
 

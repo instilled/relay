@@ -779,7 +779,7 @@ mod tests {
                 .into_iter()
                 .map(|h| &*Box::leak(h))
                 .collect();
-        let harnesses: Harnesses = Box::new(move |n| all.iter().copied().find(|h| h.name() == n));
+        let harnesses: Harnesses = Box::new(move |n| all.iter().copied().find(|h| h.info().name == n));
         (harnesses, bin)
     }
 

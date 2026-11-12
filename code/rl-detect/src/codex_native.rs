@@ -28,10 +28,10 @@
 //! good (`thread/delete`), its running turn interrupted first.
 
 use crate::harness::{
-    self, Actions, Attach, CarryOn, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, RenameHow, Renamed,
-    Session, Start, Started, Steps, held,
+    self, Actions, Attach, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, RenameHow, Renamed, Session,
+    Start, Started, held,
 };
-use crate::mcp_entry::{How, Place};
+use crate::mcp_entry::How;
 use crate::registry::Profile;
 use crate::sessions::{ID, Rename};
 use anyhow::{Context, Result, anyhow, bail};
@@ -156,24 +156,10 @@ impl Codex {
     }
 }
 
-impl Steps for Codex {
-    fn profile(&self) -> &Profile {
-        &self.profile
-    }
-
-    fn bin(&self) -> &str {
-        &self.bin
-    }
-
-    fn found(&self) -> bool {
-        self.found
-    }
-
-    fn lists(&self) -> bool {
-        true
-    }
-
-    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
+impl Codex {
+    /// Its threads, as its daemon has them, for no longer than `wait`: none
+    /// where this Codex no longer lists them as Relay asks.
+    pub fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
         let compat = self.compat().unwrap_or_default();
         if compat.off(Feature::List).is_some() {
             return Ok(Vec::new());
@@ -189,65 +175,27 @@ impl Steps for Codex {
             .collect())
     }
 
-    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
+    /// What opens its thread `id` here, through the daemon (`codex resume
+    /// <id>`).
+    pub fn attach_argv(&self, id: &str) -> Vec<String> {
         let args: Vec<String> = self.attach.iter().map(|a| a.replace(ID, id)).collect();
-        Some(self.argv(&args))
+        self.argv(&args)
     }
 
-    /// A prompt: a thread on the daemon, its first turn started. None: the
-    /// TUI, here.
-    fn start_in(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, _: &HashSet<String>) -> Result<Started> {
-        let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) else {
-            return Ok(Started::Here(vec![self.bin.clone()]));
-        };
-        self.needs(Feature::Start)?;
-        let (cwd, name, prompt) = (
-            cwd.to_path_buf(),
-            name.filter(|n| !n.trim().is_empty()).map(str::to_string),
-            prompt.to_string(),
-        );
-        self.on_daemon(move |d| begin(d, &cwd, name.as_deref(), &prompt))
-            .map(Started::Background)
-    }
-
-    fn never_held(&self) -> bool {
-        true
-    }
-
-    /// A conversation is a thread on the daemon already: enter resumes it
-    /// there (`attach_argv`), never held.
-    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
-        self.attach_argv(session_id).map(CarryOn::Attach)
-    }
-
-    /// A thread with a turn running: stop interrupts it.
-    fn stops(&self, row: &NativeRow) -> bool {
-        matches!(row.state.state, RunState::Working | RunState::NeedsInput)
-            && self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none())
-    }
-
-    fn stop_id(&self, id: &str, _: &Path) -> Result<()> {
+    /// Interrupts the turn its thread `id` runs.
+    fn stop_id(&self, id: &str) -> Result<()> {
         self.needs(Feature::Stop)?;
         let id = id.to_string();
         self.on_daemon(move |d| interrupt(d, &id))
     }
 
-    /// Any thread, running or at rest: `thread/delete` on its daemon. Not
-    /// where this Codex no longer has it.
-    fn removes(&self, _: &NativeRow) -> bool {
-        self.compat_known().is_none_or(|c| c.off(Feature::Remove).is_none())
-    }
-
-    fn remove_id(&self, id: &str, _: &Path) -> Result<()> {
+    /// Deletes its thread `id` for good (`thread/delete`), its running turn
+    /// interrupted first where this Codex can.
+    fn remove_id(&self, id: &str) -> Result<()> {
         self.needs(Feature::Remove)?;
-        let stops = self.compat_known().is_none_or(|c| c.off(Feature::Stop).is_none());
+        let stops = self.has(Feature::Stop);
         let id = id.to_string();
         self.on_daemon(move |d| delete(d, &id, stops))
-    }
-
-    /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
-    fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
-        harness::mcp_place(self, env, How::Toml)
     }
 }
 
@@ -273,9 +221,7 @@ impl Harness for Codex {
     /// among them cannot go to the daemon.
     fn start(&self, s: &Start) -> Result<Started> {
         if let Some(id) = &s.resume {
-            return Ok(Started::Here(
-                self.attach_argv(id).context("its profile says no `sessions.attach`")?,
-            ));
+            return Ok(Started::Here(self.attach_argv(id)));
         }
         let prompt = match &s.words {
             Some(words) => {
@@ -303,11 +249,9 @@ impl Harness for Codex {
     /// here the same way, never held.
     fn attach(&self, s: &Session) -> Attach {
         match s.owner {
-            Owner::Relay { .. } => held::attach(self, s),
-            Owner::Own => self.attach_argv(&s.id).map_or(Attach::No, Attach::Argv),
-            Owner::Elsewhere { .. } if s.state == RunState::Idle => {
-                self.attach_argv(&s.id).map_or(Attach::No, Attach::Argv)
-            }
+            Owner::Relay { .. } => held::attach(&self.profile, s),
+            Owner::Own => Attach::Argv(self.attach_argv(&s.id)),
+            Owner::Elsewhere { .. } if s.state == RunState::Idle => Attach::Argv(self.attach_argv(&s.id)),
             Owner::Elsewhere { .. } => Attach::No,
         }
     }
@@ -333,14 +277,14 @@ impl Harness for Codex {
 
     fn stop(&self, s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Own => Steps::stop_id(self, &s.id, &s.cwd),
+            Owner::Own => self.stop_id(&s.id),
             _ => held::stop(s),
         }
     }
 
     fn remove(&self, s: &Session) -> Result<()> {
         match s.owner {
-            Owner::Own => Steps::remove_id(self, &s.id, &s.cwd),
+            Owner::Own => self.remove_id(&s.id),
             _ => held::remove(s),
         }
     }
@@ -367,12 +311,12 @@ impl Harness for Codex {
     /// Queued on its thread, the thread resumed on the daemon (`codex
     /// queue … --resume`).
     fn notify(&self, s: &Session, mail: &Mail) -> Notified {
-        held::notify(self, s, mail)
+        held::notify(&self.profile, &self.bin, s, mail)
     }
 
     /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
     fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>> {
-        held::setup(self, env, How::Toml)
+        held::setup(&self.profile, env, How::Toml)
     }
 
     fn caller(&self, _: &dyn Fn(&str) -> Option<String>) -> Option<String> {
@@ -1622,21 +1566,24 @@ mod tests {
         let c = codex("codex".into());
         assert_eq!(c.argv(&c.list), ["codex", "app-server", "proxy"]);
         assert_eq!(
-            c.attach_argv("01a11d20-8cab-7061-885d-f86e8e313f11").unwrap(),
+            c.attach_argv("01a11d20-8cab-7061-885d-f86e8e313f11"),
             ["codex", "resume", "01a11d20-8cab-7061-885d-f86e8e313f11"]
         );
         assert_eq!(
-            Steps::start_in(&c, Path::new("/w"), None, None, &HashSet::new()).unwrap(),
+            c.start(&Start::default()).unwrap(),
             Started::Here(vec!["codex".into()]),
             "no prompt: its TUI, here"
         );
-        assert!(c.never_held());
+        let carried = Start {
+            resume: Some("s".into()),
+            ..Start::default()
+        };
         assert_eq!(
-            c.carry_on("s"),
-            Some(CarryOn::Attach(vec!["codex".into(), "resume".into(), "s".into()])),
-            "a thread is on the daemon already: resumed there"
+            c.start(&carried).unwrap(),
+            Started::Here(vec!["codex".into(), "resume".into(), "s".into()]),
+            "a thread is on the daemon already: resumed there, never held"
         );
-        let mut row = row(Thread {
+        let mut s = Session::own(&row(Thread {
             id: "t".into(),
             session_id: None,
             name: None,
@@ -1650,15 +1597,12 @@ mod tests {
             originator: None,
             created_at: None,
             updated_at: None,
-        });
-        assert!(c.stops(&row), "a turn running");
-        row.state = state(&Status {
-            kind: "idle".into(),
-            active_flags: Vec::new(),
-        });
-        assert!(!c.stops(&row), "nothing running to stop");
+        }));
+        assert!(c.actions(&s).stop, "a turn running");
+        s.state = RunState::Idle;
+        assert!(!c.actions(&s).stop, "nothing running to stop");
         assert_eq!(
-            c.ping_argv("01a1", "mail from x").unwrap(),
+            harness::ping_argv(&c.profile, "codex", "01a1", "mail from x").unwrap(),
             [
                 "codex",
                 "queue",
@@ -1689,14 +1633,14 @@ mod tests {
              echo 'Error: failed to connect to socket at /h/.codex/app-server-control/app-server-control.sock' >&2\n\
              exit 1",
         );
-        assert_eq!(codex(bin).list().unwrap(), Vec::new());
+        assert_eq!(codex(bin).list_within(LIST_WAIT).unwrap(), Vec::new());
     }
 
     #[test]
     fn a_proxy_that_fails_or_hangs_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = script(tmp.path(), "echo 'Error: something else' >&2; exit 2");
-        let e = codex(bin).list().unwrap_err();
+        let e = codex(bin).list_within(LIST_WAIT).unwrap_err();
         assert_eq!(e.to_string(), "`codex app-server proxy` failed: Error: something else");
         let bin = script(tmp.path(), "exec sleep 30");
         let at = std::time::Instant::now();
@@ -1941,7 +1885,7 @@ mod tests {
         let r = Registry::builtin();
         let p = r.profile("codex").unwrap();
         let bin = crate::registry::find_bin(&p.bins).expect("codex on PATH");
-        for row in Codex::of(p, bin).unwrap().list().unwrap() {
+        for row in Codex::of(p, bin).unwrap().list_within(LIST_WAIT).unwrap() {
             assert!(row.cwd.is_absolute(), "{row:?}");
             assert!(!row.state.words.is_empty(), "{row:?}");
         }

@@ -1637,8 +1637,12 @@ async fn a_codex_thread_is_renamed_on_its_daemon_and_keeps_no_relay_name() {
     let f = fixture();
     let mut app = list(&f).await;
     let codex = crate::sources::harness("codex").unwrap();
-    let started =
-        rl_detect::harness::Steps::start_in(codex, &f.repo, None, Some("fix it"), &Default::default()).unwrap();
+    let start = rl_detect::harness::Start {
+        cwd: f.repo.clone(),
+        prompt: Some("fix it".into()),
+        ..Default::default()
+    };
+    let started = codex.start(&start).unwrap();
     let rl_detect::harness::Started::Background(id) = started else {
         panic!("{started:?}");
     };
