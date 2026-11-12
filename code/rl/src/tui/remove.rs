@@ -9,7 +9,8 @@
 //! session stopped if need be and its folder removed. One of a harness's own
 //! it cannot remove but can stop is stopped. Anything else — a session an
 //! agent's hooks told of, one of a harness's own it can do nothing with, a
-//! project — is hidden. One already hidden and shown only because hidden is
+//! project — is hidden, but a project you added (`/project`) with nothing in
+//! it is taken off the list. One already hidden and shown only because hidden is
 //! on (or because it came through) is brought back. Pure, so what you are
 //! told can be tested on its own.
 
@@ -54,6 +55,13 @@ pub enum Removal {
     Hide { key: String, title: String },
     /// Back on the list.
     Unhide { key: String, title: String },
+    /// A project you added (`/project`) with nothing in it: off the list,
+    /// and no longer one you added.
+    Forget {
+        key: String,
+        folder: PathBuf,
+        title: String,
+    },
 }
 
 impl Removal {
@@ -66,6 +74,7 @@ impl Removal {
             Removal::RemoveNative { title, .. } | Removal::Remove { title, .. } => format!("remove {title}"),
             Removal::Hide { title, .. } => format!("hide {title}"),
             Removal::Unhide { title, .. } => format!("bring back {title}"),
+            Removal::Forget { title, .. } => format!("take {title} off the list"),
         }
     }
 }
@@ -207,11 +216,21 @@ pub fn plan(line: &Line, prefs: &ListPrefs, status: impl Fn(&str) -> Option<Stat
 }
 
 /// `line` hidden, or brought back if it is hidden: a session of any kind,
-/// or a project. `Err` says why not.
+/// or a project — but a project you added with nothing in it is taken off
+/// the list, not hidden. `Err` says why not.
 pub fn hide_plan(line: &Line, prefs: &ListPrefs) -> Result<Removal, String> {
     let names = Names::new(&prefs.names);
     let hidden = |key: &str| prefs.hidden.iter().any(|h| h.key == key);
     let (key, title) = match line {
+        Line::Group(h)
+            if h.is_project() && h.empty && !hidden(&h.key) && rows::added(prefs).any(|f| f == h.workspace) =>
+        {
+            return Ok(Removal::Forget {
+                key: h.key.clone(),
+                folder: h.workspace.clone(),
+                title: h.name.clone(),
+            });
+        }
         Line::Group(h) if h.is_project() => (h.key.clone(), h.name.clone()),
         Line::Group(_) => return Err("a heading has nothing to hide".into()),
         Line::Session(r) => {
@@ -280,6 +299,7 @@ mod tests {
             name: "api".into(),
             own: None,
             attention: 0,
+            empty: false,
             heading: None,
             checkout: None,
         }

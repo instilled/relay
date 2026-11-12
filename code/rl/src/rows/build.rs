@@ -72,6 +72,7 @@ pub fn head(folder: &Path, names: &Names, checkouts: &Checkouts, attention: usiz
         name: names.workspace(folder),
         own: names.own(folder),
         attention,
+        empty: false,
         heading: None,
     }
 }
@@ -100,8 +101,12 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
         *buried.entry(project.to_path_buf()).or_insert(0) += 1;
         *buried_under.entry(Heading::of(r.state)).or_insert(0) += 1;
     };
+    // Every project some row stands under, shown or not: a header not among
+    // them has nothing in it.
+    let mut held: HashSet<PathBuf> = HashSet::new();
     for r in rows {
         let project = project_of(r, &names);
+        held.insert(project.clone());
         let project_name = names.workspace(&project);
         let since = hidden_since(r, &project, &prefs.hidden);
         let is_pinned = cx.pinned(r);
@@ -163,7 +168,7 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
         .map(Line::Session)
         .collect();
     match prefs.grouping {
-        Grouping::Project => lines.extend(by_project(groups, &buried, cx, &query)),
+        Grouping::Project => lines.extend(by_project(groups, &buried, &held, cx, &query)),
         Grouping::State => lines.extend(by_state(groups, &buried_under)),
     }
     lines
@@ -174,6 +179,7 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
 fn by_project<'a>(
     groups: Vec<(PathBuf, Vec<&'a Row>)>,
     buried: &HashMap<PathBuf, usize>,
+    held: &HashSet<PathBuf>,
     cx: &Context<'_>,
     query: &Query,
 ) -> Vec<Line<'a>> {
@@ -196,8 +202,9 @@ fn by_project<'a>(
         block.extend(rows.into_iter().map(Line::Session));
         blocks.push((h.name.to_lowercase(), h.key, block));
     }
-    // A folder you named is on the list, whatever the toggles, even with
-    // nothing in it; so is one with rows that need you buried in it. The
+    // A folder you named or added (`/project`) is on the list, whatever the
+    // toggles, even with nothing in it; so is one with rows that need you
+    // buried in it. The
     // toggles narrow what is shown inside projects, never which projects
     // there are; only the filter takes them away — and hiding, which puts a
     // project's header off the list, back inline only when hidden is on.
@@ -208,6 +215,7 @@ fn by_project<'a>(
         .map(PathBuf::from)
         .collect();
     let mut heads: Vec<PathBuf> = names.paths();
+    heads.extend(added(prefs));
     heads.extend(buried.keys().cloned());
     if prefs.show_hidden {
         heads.extend(hidden_heads.iter().cloned());
@@ -220,7 +228,10 @@ fn by_project<'a>(
         if shown.contains(&p) {
             continue;
         }
-        let h = head(&p, &names, cx.checkouts, attention(&p));
+        let h = Head {
+            empty: !held.contains(&p),
+            ..head(&p, &names, cx.checkouts, attention(&p))
+        };
         if !query.hits_project(
             &[&h.name, &h.place, p.to_str().unwrap_or("")],
             branch_of(cx.checkouts, &p),

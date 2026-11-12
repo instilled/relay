@@ -24,12 +24,18 @@ pub fn project_of(r: &Row, names: &Names) -> PathBuf {
         .unwrap_or_else(|| r.cwd.clone())
 }
 
+/// The folders you added as projects (`/project`).
+pub fn added(prefs: &ListPrefs) -> impl Iterator<Item = PathBuf> + '_ {
+    prefs.projects.iter().filter(|p| !p.is_empty()).map(PathBuf::from)
+}
+
 /// The folders the list will have projects for: those its rows stand under
-/// and those you named. What `git::checkouts` is asked about.
+/// and those you named or added. What `git::checkouts` is asked about.
 pub fn project_folders(rows: &[Row], prefs: &ListPrefs) -> Vec<PathBuf> {
     let names = Names::new(&prefs.names);
     let mut folders: Vec<PathBuf> = rows.iter().map(|r| project_of(r, &names)).collect();
     folders.extend(names.paths());
+    folders.extend(added(prefs));
     folders.sort();
     folders.dedup();
     folders
