@@ -60,13 +60,16 @@ pub fn hidden_with(project: &Path, hidden: &[Hidden]) -> Option<&'static str> {
     hidden.iter().any(|h| h.key == key).then_some("its project")
 }
 
+/// How many hidden rows — by their own hide or their project's — need you:
+/// the count the header's hidden toggle carries while it is off.
+pub fn hidden_wanting(rows: &[Row], prefs: &ListPrefs) -> usize {
+    let names = Names::new(&prefs.names);
+    rows.iter()
+        .filter(|r| wants(r.state) && hidden_since(r, &project_of(r, &names), &prefs.hidden).is_some())
+        .count()
+}
+
 /// Whether a row wants you: it asks, is blocked, or failed.
 pub fn wants(s: RunState) -> bool {
     matches!(s, RunState::NeedsInput | RunState::Blocked | RunState::Failed)
-}
-
-/// A hidden row that has come to need you since it was hidden — asking,
-/// blocked or failed after you said so. It comes through to the list.
-pub fn comes_through(r: &Row, since: Timestamp) -> bool {
-    wants(r.state) && r.state_at.is_some_and(|t| t > since)
 }
