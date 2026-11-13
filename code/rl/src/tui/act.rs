@@ -13,7 +13,7 @@ use super::slash;
 use super::theme;
 use crate::config::{Hidden, ListPrefs};
 use crate::rows::{self, Context, Line, Names};
-use crate::sources::{self, Attach, Harness, Session, Source};
+use crate::sources::{self, Attach, Harness, Owner, Session, Source};
 use crate::spawn::{self, Start};
 use crate::store::sessions;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -60,6 +60,8 @@ impl App {
         let names = Names::new(&self.config.list.names);
         let (title, key) = (names.title(r).to_string(), r.key.clone());
         let (harness, source, state) = (r.harness.clone(), r.source, r.state);
+        // Its harness lists it as open in a terminal of its own still.
+        let open = matches!(r.session.owner, Owner::Elsewhere { open: true, .. });
         let to = match &r.attach {
             Attach::Held(name) => {
                 let name = name.clone();
@@ -77,6 +79,9 @@ impl App {
             Attach::CarryOn(start) => {
                 let start = start.clone();
                 return self.carry_on(start, &harness, title, key);
+            }
+            Attach::None if open => {
+                return self.say(format!("{title} runs in another terminal · switch to it there"));
             }
             Attach::None if source == Source::Hooked && state == rl_core::state::RunState::Idle => {
                 return self.say(format!(
@@ -305,7 +310,7 @@ impl App {
             // The harness's name now, at once, not at its next listing; and
             // Relay keeps none beside it.
             for n in self.native.rows.iter_mut() {
-                if !name.is_empty() && format!("n:{}:{}", n.harness, n.id) == *key {
+                if !name.is_empty() && sources::key_of(n) == *key {
                     n.name = name.clone();
                 }
             }
@@ -324,7 +329,7 @@ impl App {
             self.change_prefs(|p| forget(p, &key));
             // Gone from its harness too: off the list now, not at its next
             // listing.
-            self.native.rows.retain(|r| format!("n:{}:{}", r.harness, r.id) != key);
+            self.native.rows.retain(|r| sources::key_of(r) != key);
         }
         self.reload();
         if let Some(c) = d.setup {
