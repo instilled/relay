@@ -59,7 +59,8 @@ rl setup --remove   # take the hooks and the server out again (--harness H limit
 `rl` opens the list. Rows are agents and shells under their project (a folder you named, else its
 git checkout, worktrees under their main one), or grouped by state: Needs input, Working, Done.
 Claude's background sessions and Codex's threads are on it as their own tools show them, and
-agents in other terminals are on it through their hooks. `/project <folder>` adds a project with
+agents in other terminals are on it through their hooks (a Claude open in another terminal by the
+name Claude gives it). `/project <folder>` adds a project with
 nothing running in it yet; the cursor lands on it, so typing starts something there.
 
 `enter` attaches; `ctrl+\` detaches and leaves it running (from a Claude or Codex session of

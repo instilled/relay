@@ -798,6 +798,7 @@ pub fn row(t: Thread) -> NativeRow {
         session_id: t.session_id.filter(|s| !s.is_empty()).unwrap_or_else(|| t.id.clone()),
         state: state(&t.status),
         id: t.id,
+        elsewhere: false,
         name,
         cwd: t.cwd,
         summary: None,
@@ -1779,6 +1780,7 @@ mod tests {
         let row = NativeRow {
             harness: "codex".into(),
             id: "t1".into(),
+            elsewhere: false,
             session_id: "t1".into(),
             name: "x".into(),
             cwd: "/w".into(),
