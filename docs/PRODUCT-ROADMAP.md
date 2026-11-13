@@ -13,7 +13,8 @@ every harness, Codex removing by `thread/delete` (#222); empty Codex threads not
 close always ends a held run (#224); the docs slimmed (#225); `/project <folder>` (#226); one
 intent-level `Harness` interface on stable contracts only — no typing, no screen watch; an idle
 Claude woken by `claude stop` + `--resume --bg`, its row and mail carried to the forked session
-(#227).
+(#227). 2026-11-13: a Claude open in another terminal goes by its own name, one row with its
+hooks; ctrl+x hides it and enter says to switch to it there (#228).
 
 ## Next
 
