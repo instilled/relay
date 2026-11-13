@@ -27,7 +27,9 @@ reply and a short demo.
 * Peek and reply from the list without attaching (as `claude agents`' space): the core loop of
   watching a pile of agents, today a full attach and `ctrl+\` each time.
 * An install without Rust: release binaries for macOS and Linux (`rl`, `rl-session`) built on a
-  tag, a one-line install in the README; the repo public.
+  tag, a one-line install in the README; the repo public. Unsigned for the beta: `curl` and a
+  Homebrew tap set no quarantine, and Rust's linker ad-hoc signs arm64. A browser download gets
+  the "cannot be verified" dialog; the README gives `xattr -d com.apple.quarantine rl rl-session`.
 * Verify live before strangers hit it: Relay starting the Codex daemon, `/stop` on a Codex turn
   (`turn/interrupt`), `thread/delete`, the Gemini MCP entry.
 * A 60-second demo: a Claude and a Codex on the list, one asks the other to review, the reply
@@ -47,6 +49,9 @@ reply and a short demo.
 * Lister timeouts that leave no threads lingering.
 * `rl setup --harness X` through the wizard, not only plain output.
 * Compatibility CI: recorded fixtures of the real CLIs, and a nightly run against them.
+* Notarized macOS binaries, by the public announcement or the first user hitting the dialog:
+  the Apple Developer Program (~$99/yr) for a Developer ID; the release workflow runs `codesign`
+  and `xcrun notarytool submit --wait`, the cert and an app-specific password as GitHub secrets.
 * Verify live what's left: an `agy` session calling `who`, `claude rm`.
 
 ## Dropped
