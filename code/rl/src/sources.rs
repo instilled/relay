@@ -1,7 +1,8 @@
 //! The list's rows, from its three sources: sessions Relay holds
 //! (`sessions/`), agents' own sessions their hooks told of (`state/`), and
-//! the harnesses' own background sessions (`Harness::list`). One `Row` each;
-//! the list never asks which source a row came from.
+//! the harnesses' own background sessions (`Harness::sessions`). One `Row`
+//! each, with the `Session` its harness's intents are asked of: what enter
+//! does with it, and what stops and removes it, are its harness's to say.
 
 use crate::rows::{registry, state_words};
 use crate::store::sessions::{Held, Status};
@@ -23,23 +24,20 @@ pub enum Source {
     Native,
 }
 
-/// What enter does with a row.
+/// What enter does with a row, as its harness says (`Harness::attach`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attach {
     /// Attach to the Relay-held session of this name.
     Held(String),
     /// Run this, in the terminal, to attach to the harness's own session.
     Argv(Vec<String>),
-    /// Run this to carry the conversation on, then attach: in the
-    /// harness's own background (`background`), else held by Relay.
-    CarryOn {
-        argv: Vec<String>,
-        background: bool,
-    },
+    /// Start this to carry the conversation on (`Harness::start`), then
+    /// attach to what it began.
+    CarryOn(Start),
     None,
 }
 
-pub use rl_detect::harness::{CarryOn, Harness, NativeRow, NativeState, Pr};
+pub use rl_detect::harness::{Harness, NativeRow, NativeState, Owner, Pr, Session, Start};
 
 /// What lists a harness's own background sessions. Asked from a background
 /// task while the list is open, so `list` may block (it runs the harness's
@@ -60,24 +58,27 @@ struct Listing(&'static dyn Harness);
 
 impl NativeLister for Listing {
     fn harness(&self) -> &str {
-        self.0.name()
+        &self.0.info().name
     }
 
     fn list(&self) -> anyhow::Result<Vec<NativeRow>> {
-        self.0.list()
+        self.list_within(rl_detect::harness::LIST_WAIT)
     }
 
     fn list_within(&self, wait: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
-        self.0.list_within(wait)
+        self.0.sessions(wait).rows()
     }
 }
 
-/// Every harness the profiles name, found on this machine or not. Made
-/// once.
+/// Every harness the profiles name, found on this machine or not, Relay's
+/// own sessions stopped and removed by its store (`cmd::Store`). Made once.
 #[cfg(not(test))]
 pub fn harnesses() -> &'static [Box<dyn Harness>] {
     static ALL: OnceLock<Vec<Box<dyn Harness>>> = OnceLock::new();
-    ALL.get_or_init(|| rl_detect::harness::harnesses(registry(), find_bin))
+    ALL.get_or_init(|| {
+        rl_detect::harness::set_holder(std::sync::Arc::new(crate::cmd::Store));
+        rl_detect::harness::harnesses(registry(), find_bin)
+    })
 }
 
 /// The tests never run a real harness, but a stand-in: Codex's daemon a
@@ -88,6 +89,7 @@ pub fn harnesses() -> &'static [Box<dyn Harness>] {
 pub fn harnesses() -> &'static [Box<dyn Harness>] {
     static ALL: OnceLock<Vec<Box<dyn Harness>>> = OnceLock::new();
     ALL.get_or_init(|| {
+        rl_detect::harness::set_holder(std::sync::Arc::new(crate::cmd::Store));
         let bin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/stand-in-harness"));
         let codex = codex_stand_in();
         let registry = registry();
@@ -100,11 +102,15 @@ pub fn harnesses() -> &'static [Box<dyn Harness>] {
         })
         .into_iter()
         .map(|h| {
-            if !h.lists() {
+            let lists = registry
+                .profile(&h.info().name)
+                .and_then(|p| p.sessions.as_ref())
+                .is_some_and(|s| s.list.is_some());
+            if !lists {
                 return h;
             }
             let claude = registry
-                .profile(h.name())
+                .profile(&h.info().name)
                 .filter(|p| p.name == "claude")
                 .and_then(|p| rl_detect::claude_native::Claude::of(p, bin.clone()));
             Box::new(StandIn { inner: h, claude }) as Box<dyn Harness>
@@ -181,39 +187,21 @@ impl StandIn {
     fn begin(&self, argv: &[String], cwd: &std::path::Path, before: &HashSet<String>) -> anyhow::Result<String> {
         STARTED.lock().unwrap().push(cwd.to_path_buf());
         rl_detect::claude_native::begin(
-            |w| self.list_within(w),
+            |_| Ok(self.listed()),
             argv,
             cwd,
             before,
             rl_detect::claude_native::LISTED_WAIT,
         )
     }
-}
 
-#[cfg(test)]
-impl Harness for StandIn {
-    fn profile(&self) -> &rl_detect::Profile {
-        self.inner.profile()
-    }
-
-    fn bin(&self) -> &str {
-        self.inner.bin()
-    }
-
-    fn found(&self) -> bool {
-        self.inner.found()
-    }
-
-    fn lists(&self) -> bool {
-        self.inner.lists()
-    }
-
-    fn list_within(&self, _: std::time::Duration) -> anyhow::Result<Vec<NativeRow>> {
+    /// What it lists: what Claude started, working, in each folder.
+    fn listed(&self) -> Vec<NativeRow> {
         let started = STARTED.lock().unwrap();
-        Ok(started
+        started
             .iter()
             .map(|cwd| NativeRow {
-                harness: self.name().into(),
+                harness: self.inner.info().name.clone(),
                 id: "0a1b2c3d".into(),
                 session_id: "s-0a1b2c3d".into(),
                 name: "started".into(),
@@ -229,123 +217,92 @@ impl Harness for StandIn {
                 pr: None,
                 color: None,
             })
-            .collect())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+impl Harness for StandIn {
+    fn info(&self) -> &rl_detect::harness::Info {
+        self.inner.info()
     }
 
-    fn start(
-        &self,
-        cwd: &std::path::Path,
-        name: Option<&str>,
-        prompt: Option<&str>,
-        before: &HashSet<String>,
-    ) -> anyhow::Result<rl_detect::harness::Started> {
-        match self.claude.as_ref().and_then(|c| c.start_argv(name, prompt)) {
-            Some(argv) => self.begin(&argv, cwd, before).map(rl_detect::harness::Started::Id),
-            None => self.inner.start(cwd, name, prompt, before),
+    fn sessions(&self, _: std::time::Duration) -> rl_detect::harness::Listed {
+        rl_detect::harness::Listed::Rows(self.listed())
+    }
+
+    /// Claude's start, run on the stand-in and listed by it; the rest the
+    /// harness's own.
+    fn start(&self, s: &rl_detect::harness::Start) -> anyhow::Result<rl_detect::harness::Started> {
+        let argv = s.words.is_none().then(|| {
+            self.claude
+                .as_ref()
+                .and_then(|c| c.bg_argv(s.resume.as_deref(), s.name.as_deref(), s.prompt.as_deref()))
+        });
+        match argv.flatten() {
+            Some(argv) => self
+                .begin(&argv, &s.cwd, &HashSet::new())
+                .map(rl_detect::harness::Started::Background),
+            None => Harness::start(self.inner.as_ref(), s),
         }
     }
 
-    fn never_held(&self) -> bool {
-        self.inner.never_held()
+    fn attach(&self, s: &rl_detect::harness::Session) -> rl_detect::harness::Attach {
+        self.inner.attach(s)
     }
 
-    fn held_argv(
-        &self,
-        home: &rl_core::Home,
-        argv: Vec<String>,
-        rl: &dyn Fn() -> anyhow::Result<PathBuf>,
-    ) -> anyhow::Result<Vec<String>> {
-        self.inner.held_argv(home, argv, rl)
+    fn actions(&self, s: &rl_detect::harness::Session) -> rl_detect::harness::Actions {
+        self.inner.actions(s)
     }
 
-    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
-        self.inner.attach_argv(id)
+    fn stop(&self, s: &rl_detect::harness::Session) -> anyhow::Result<()> {
+        Harness::stop(self.inner.as_ref(), s)
     }
 
-    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
-        self.inner.carry_on(session_id)
+    fn remove(&self, s: &rl_detect::harness::Session) -> anyhow::Result<()> {
+        Harness::remove(self.inner.as_ref(), s)
     }
 
-    fn carry_on_there(
-        &self,
-        argv: &[String],
-        cwd: &std::path::Path,
-        before: &HashSet<String>,
-    ) -> anyhow::Result<String> {
-        self.begin(argv, cwd, before)
+    fn rename(&self, s: &rl_detect::harness::Session, name: &str) -> rl_detect::harness::Renamed {
+        Harness::rename(self.inner.as_ref(), s, name)
     }
 
-    fn stops(&self, row: &NativeRow) -> bool {
-        self.inner.stops(row)
+    fn notify(&self, s: &rl_detect::harness::Session, mail: &rl_detect::harness::Mail) -> rl_detect::harness::Notified {
+        self.inner.notify(s, mail)
     }
 
-    fn stop(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.stop(id, cwd)
+    fn setup(&self, env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> anyhow::Result<Vec<rl_detect::setup::Part>> {
+        self.inner.setup(env)
     }
 
-    fn removes(&self, row: &NativeRow) -> bool {
-        self.inner.removes(row)
+    fn caller(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        self.inner.caller(env)
     }
 
-    fn remove(&self, id: &str, cwd: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.remove(id, cwd)
-    }
-
-    fn ping_argv(&self, id: &str, text: &str) -> Option<Vec<String>> {
-        self.inner.ping_argv(id, text)
-    }
-
-    fn renames(&self, row: &NativeRow, name: &str) -> bool {
-        self.inner.renames(row, name)
-    }
-
-    fn rename(&self, row: &NativeRow, name: &str, locks: &std::path::Path) -> anyhow::Result<()> {
-        self.inner.rename(row, name, locks)
-    }
-
-    fn wake(&self, row: &NativeRow, line: &str, locks: &std::path::Path) -> Option<rl_detect::harness::Woke> {
-        self.inner.wake(row, line, locks)
-    }
-
-    fn user_hooks(&self) -> Option<&rl_detect::sessions::UserHooks> {
-        self.inner.user_hooks()
-    }
-
-    fn has_mcp(&self) -> bool {
-        self.inner.has_mcp()
-    }
-
-    fn mcp(
-        &self,
-        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
-    ) -> anyhow::Result<Option<rl_detect::mcp_entry::Place>> {
-        self.inner.mcp(env)
-    }
-
-    fn caller_id_var(&self) -> Option<&'static str> {
-        self.inner.caller_id_var()
-    }
-
-    fn mail_by_hooks(&self) -> bool {
-        self.inner.mail_by_hooks()
-    }
-
-    fn wake_advice(&self, name: &str) -> Option<String> {
-        self.inner.wake_advice(name)
+    fn check(&self) -> rl_detect::harness::Compat {
+        self.inner.check()
     }
 }
 
 /// The harness of the profile `name`.
 pub fn harness(name: &str) -> Option<&'static dyn Harness> {
-    harnesses().iter().find(|h| h.name() == name).map(|h| h.as_ref())
+    harnesses().iter().find(|h| h.info().name == name).map(|h| h.as_ref())
 }
 
-/// The listers the list asks: the harnesses on this machine with a
-/// background of their own.
+/// The harness of a session's: its profile's, else the generic one (a
+/// command Relay holds that no profile names).
+pub fn harness_of(name: &str) -> &'static dyn Harness {
+    harness(name)
+        .or_else(|| harness(rl_detect::registry::GENERIC))
+        .expect("the generic profile's harness")
+}
+
+/// The listers the list asks: the harnesses on this machine (one Relay
+/// holds lists none of its own).
 pub fn native_listers() -> Vec<Box<dyn NativeLister>> {
     harnesses()
         .iter()
-        .filter(|h| h.lists() && h.found())
+        .filter(|h| h.info().found)
         .map(|h| Box::new(Listing(h.as_ref())) as Box<dyn NativeLister>)
         .collect()
 }
@@ -427,12 +384,14 @@ pub struct Row {
     /// The colour its harness draws it in, by name (`pink`); none for most.
     pub color: Option<String>,
     pub attach: Attach,
-    /// The id its harness stops it by (`Harness::stop`), where it is a
-    /// harness's own session its harness can stop as it stands.
+    /// The id its harness stops it by, where it is a harness's own session
+    /// its harness can stop as it stands (`Harness::actions`).
     pub stop: Option<String>,
-    /// Whether its harness deletes it for good (`Harness::removes`): a
-    /// harness's own session only; Relay removes its own itself.
+    /// Whether its harness deletes it for good (`Harness::actions`): a
+    /// harness's own session; one Relay holds is asked about by `^x`.
     pub removes: bool,
+    /// What its harness's intents are asked of.
+    pub session: Session,
     pub kind: RunKind,
     /// The root of the repository its folder is in, as read when the rows
     /// were (`git::toplevel`).
@@ -519,6 +478,21 @@ fn held_row(h: &Held) -> Row {
         .and_then(|k| k.detail.clone())
         .or_else(|| h.state.as_ref().and_then(|s| s.detail.clone()))
         .or_else(|| h.state.as_ref().and_then(|s| s.last_line.clone()));
+    let session = Session {
+        harness: m.harness.clone(),
+        owner: Owner::Relay {
+            live: h.status == Status::Live,
+            dir: h.dir.clone(),
+        },
+        id: m.name.clone(),
+        session_id: h.hook.as_ref().map(|k| k.session_id.clone()).unwrap_or_default(),
+        cwd: m.cwd.clone(),
+        state,
+        words: words.clone(),
+        name: m.name.clone(),
+        relay_name: None,
+        attached: false,
+    };
     Row {
         key: format!("r:{}", m.name),
         source: Source::Held,
@@ -536,62 +510,75 @@ fn held_row(h: &Held) -> Row {
         state_at: Some(at),
         pr: None,
         color: None,
-        attach: Attach::Held(m.name.clone()),
+        attach: attach(&session),
         stop: None,
         removes: false,
         kind: m.kind,
         repo: None,
+        session,
     }
 }
 
-/// What carries on a conversation open in another terminal, as its harness
-/// says (`Harness::carry_on`): in the harness's own background where it has
+/// What enter does with `s`, as its harness says.
+fn attach(s: &Session) -> Attach {
+    match harness_of(&s.harness).attach(s) {
+        rl_detect::harness::Attach::Held => Attach::Held(s.id.clone()),
+        rl_detect::harness::Attach::Argv(argv) => Attach::Argv(argv),
+        rl_detect::harness::Attach::CarryOn(start) => Attach::CarryOn(start),
+        rl_detect::harness::Attach::No => Attach::None,
+    }
+}
+
+/// A conversation open in another terminal is carried on as its harness
+/// says (`Harness::attach`): in the harness's own background where it has
 /// one, else a session Relay holds — or, for a harness Relay never holds
 /// (Codex: the conversation is a thread on its daemon), its own attach. Only
 /// one at rest — one busy or waiting there is still in use — and, in a
-/// background, only once the harness has said what runs there (`answered`):
-/// carried on while it already runs there, it would run twice.
-fn carry_on(h: &HookState, answered: &BTreeSet<String>) -> Attach {
-    if h.state != Said::Idle {
-        return Attach::None;
-    }
-    match harness(&h.agent).and_then(|x| x.carry_on(&h.session_id)) {
-        Some(CarryOn::Attach(argv)) => Attach::Argv(argv),
-        Some(CarryOn::Background(_)) if !answered.contains(&h.agent) => Attach::None,
-        Some(CarryOn::Background(argv)) => Attach::CarryOn { argv, background: true },
-        Some(CarryOn::Held(argv)) => Attach::CarryOn {
-            argv,
-            background: false,
-        },
-        None => Attach::None,
-    }
-}
-
+/// background, only once the harness has said what runs there (`answered`,
+/// `Owner::Elsewhere::listed`): carried on while it already runs there, it
+/// would run twice.
 fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
     let state = match h.state {
         Said::Idle => RunState::Idle,
         Said::Busy => RunState::Working,
         Said::Waiting => RunState::NeedsInput,
     };
+    let name = format!("session {}", h.session_id.chars().take(8).collect::<String>());
+    let words = state_words(state, Confidence::Exact);
+    let session = Session {
+        harness: h.agent.clone(),
+        owner: Owner::Elsewhere {
+            listed: answered.contains(&h.agent),
+        },
+        id: h.session_id.clone(),
+        session_id: h.session_id.clone(),
+        cwd: h.cwd.clone(),
+        state,
+        words: words.clone(),
+        name: name.clone(),
+        relay_name: None,
+        attached: false,
+    };
     Row {
         key: format!("o:{}:{}", h.agent, h.session_id),
         source: Source::Hooked,
         harness: h.agent.clone(),
-        name: format!("session {}", h.session_id.chars().take(8).collect::<String>()),
+        name,
         cwd: h.cwd.clone(),
         state,
-        words: state_words(state, Confidence::Exact),
+        words,
         summary: h.detail.clone(),
         started: Some(h.started),
         ended: None,
         state_at: Some(h.at),
         pr: None,
         color: None,
-        attach: carry_on(h, answered),
+        attach: attach(&session),
         stop: None,
         removes: false,
         kind: RunKind::Agent,
         repo: None,
+        session,
     }
 }
 
@@ -608,6 +595,8 @@ pub fn native_id(r: &Row) -> Option<&str> {
 }
 
 fn native_row(n: &NativeRow) -> Row {
+    let session = Session::own(n);
+    let can = harness_of(&n.harness).actions(&session);
     Row {
         key: format!("n:{}:{}", n.harness, n.id),
         source: Source::Native,
@@ -622,13 +611,12 @@ fn native_row(n: &NativeRow) -> Row {
         state_at: n.at,
         pr: n.pr.clone(),
         color: n.color.clone(),
-        attach: harness(&n.harness)
-            .and_then(|h| h.attach_argv(&n.id))
-            .map_or(Attach::None, Attach::Argv),
-        stop: harness(&n.harness).filter(|h| h.stops(n)).map(|_| n.id.clone()),
-        removes: harness(&n.harness).is_some_and(|h| h.removes(n)),
+        attach: attach(&session),
+        stop: can.stop.then(|| n.id.clone()),
+        removes: can.remove,
         kind: RunKind::Agent,
         repo: None,
+        session,
     }
 }
 
@@ -645,7 +633,7 @@ mod tests {
 
     /// The rows, every harness having answered.
     fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow]) -> Vec<Row> {
-        let all = harnesses().iter().map(|h| h.name().to_string()).collect();
+        let all = harnesses().iter().map(|h| h.info().name.clone()).collect();
         super::rows(held, hooked, native, &all)
     }
 
@@ -814,18 +802,20 @@ mod tests {
         assert_eq!((r.state, r.words.as_str()), (RunState::Idle, "idle"));
         assert_eq!(r.summary.as_deref(), Some("done"));
         // Claude has a background of its own: it carries on there.
-        let Attach::CarryOn { argv, background } = &r.attach else {
+        let Attach::CarryOn(start) = &r.attach else {
             panic!("{:?}", r.attach);
         };
-        assert!(background);
-        assert_eq!(argv[1..], ["--resume", "0123456789", "--bg"]);
+        assert_eq!(start.resume.as_deref(), Some("0123456789"));
         // Gemini has none: Relay holds it.
         let r = rows(&[], &[hook("gemini", "g-1", Said::Idle, None)], &[]).remove(0);
-        let Attach::CarryOn { argv, background } = &r.attach else {
+        let Attach::CarryOn(start) = &r.attach else {
             panic!("{:?}", r.attach);
         };
-        assert!(!background);
-        assert_eq!(argv[1..], ["--resume", "g-1"]);
+        assert_eq!(
+            harness("gemini").unwrap().start(start).unwrap(),
+            rl_detect::harness::Started::Held(vec!["--resume".into(), "g-1".into()]),
+            "held, its profile's resume"
+        );
         // Codex's conversation is a thread on its daemon: resumed there,
         // never held.
         let r = rows(&[], &[hook("codex", "t-1", Said::Idle, None)], &[]).remove(0);
@@ -851,13 +841,10 @@ mod tests {
         let none = BTreeSet::new();
         let r = super::rows(&[], &hooked, &[], &none);
         assert_eq!(r[0].attach, Attach::None, "claude may run it already");
-        assert!(
-            matches!(r[1].attach, Attach::CarryOn { background: false, .. }),
-            "gemini has no background"
-        );
+        assert!(matches!(r[1].attach, Attach::CarryOn(_)), "gemini has no background");
         let claude: BTreeSet<String> = ["claude".to_string()].into();
         let r = super::rows(&[], &hooked, &[], &claude);
-        assert!(matches!(r[0].attach, Attach::CarryOn { background: true, .. }));
+        assert!(matches!(r[0].attach, Attach::CarryOn(_)));
     }
 
     #[test]

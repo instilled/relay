@@ -28,34 +28,21 @@
 //!   name: [-n, "{name}"]
 //!   stop: [stop, "{id}"]
 //!   remove: [rm, "{id}"]
-//!   agents_view: ['^❯ describe a task for a new']
-//!   rename: { type: "/rename {name}" }     # or { rpc: thread/name/set }
-//!   wake: { idle: type, stopped: resume_bg }
-//!   typing: { input: '^❯(?:\x{a0}(.*))?$', busy: ['esc to interrupt'] }
+//!   rename: { rpc: thread/name/set }
 //! ```
 //!
-//! `rename`: how a session is renamed in the harness itself — a call on its
-//! daemon (`rpc`, the method; Codex's) or a line typed into it (`type`,
-//! `{name}` the name; Claude's slash command). None: a name you give it is
-//! Relay's alone.
-//!
-//! `wake`: how a session is woken for relay mail — an idle one has the
-//! mail's line typed into it (`idle: type`), one that has stopped is carried
-//! on in the harness's background with that line as its prompt (`stopped:
-//! resume_bg`). Codex is told through `ping` instead.
-//!
-//! `typing`: what an attached session's screen shows of its input, for
-//! typing a line into one (`typing::type_line`): the input line (`input`,
-//! its first group what is typed there) and what says it is busy (`busy`).
+//! `rename`: the call on its daemon that renames a session in the harness
+//! itself (`rpc`, the method; Codex's). None: the harness has no rename from
+//! outside, and how a name you give it lands is its harness's to say
+//! (`Harness::rename`: Claude's at its next start, `-n`).
 //!
 //! `remove`: the arguments that delete one of its sessions for good, after
 //! its binary (`{id}` its attach id): what `^x` twice's `remove` runs, the
 //! same choice for every harness. A harness whose remove is a call on its
 //! daemon (Codex's `thread/delete`) makes the call itself.
 //!
-//! `agents_view`: regexes over the lines of an attached session's screen
-//! that say it shows the harness's own list of its sessions; Relay's list is
-//! that list, so the attach lets go and the list comes back.
+//! What a profile says is data — commands, arguments, words; what Relay does
+//! with them is each harness's code (`harness`), and never reads a screen.
 //!
 //! What an event says is a state word, or the same in a map with more:
 //! - `started`: a session begins, and stands idle. One known already is
@@ -118,32 +105,13 @@ pub(crate) struct SessionsFile {
     stop: Option<Vec<String>>,
     ping: Option<Vec<String>>,
     remove: Option<Vec<String>>,
-    agents_view: Option<Vec<String>>,
     rename: Option<RenameFile>,
-    wake: Option<WakeFile>,
-    typing: Option<TypingFile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RenameFile {
-    rpc: Option<String>,
-    #[serde(rename = "type")]
-    typed: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WakeFile {
-    idle: Option<String>,
-    stopped: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TypingFile {
-    input: String,
-    busy: Option<Vec<String>>,
+    rpc: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -217,17 +185,8 @@ impl SessionsFile {
         if over.remove.is_some() {
             self.remove = over.remove;
         }
-        if over.agents_view.is_some() {
-            self.agents_view = over.agents_view;
-        }
         if over.rename.is_some() {
             self.rename = over.rename;
-        }
-        if over.wake.is_some() {
-            self.wake = over.wake;
-        }
-        if over.typing.is_some() {
-            self.typing = over.typing;
         }
     }
 }
@@ -259,130 +218,18 @@ pub struct Sessions {
     /// its attach id. Empty where it has no way to (or, as Codex, removes
     /// one by a call on its daemon instead).
     pub remove: Vec<String>,
-    /// How an attached session's screen says it shows the harness's own
-    /// list of its sessions (Claude's agents view); none where Relay does
-    /// not know.
-    pub agents_view: Option<ScreenMark>,
     /// How one of its sessions is renamed in the harness itself, where it
-    /// can be: none, and a name you give it is Relay's alone.
+    /// can be from outside: none, and its harness says how a name lands.
     pub rename: Option<Rename>,
-    /// How a session of it that is idle, or that has stopped, is woken for
-    /// relay mail; nothing where its profile says nothing.
-    pub wake: Wake,
-    /// How a line is typed into one of its idle sessions through its attach
-    /// (`typing::type_line`): what its screen's input line looks like.
-    pub typing: Option<Typing>,
 }
 
-/// How a harness renames one of its own sessions (`sessions.rename`).
+/// How a harness renames one of its own sessions from outside
+/// (`sessions.rename`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rename {
     /// A call on its daemon, by this method (Codex's `thread/name/set`).
     Rpc(String),
-    /// This line typed into the session, `{name}` the name (Claude's
-    /// `/rename {name}`).
-    Type(String),
 }
-
-/// How a harness's session is woken for relay mail (`sessions.wake`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Wake {
-    /// One that is idle: the mail's line typed into it (`type`).
-    pub idle: Option<WakeIdle>,
-    /// One that has stopped or ended: carried on in the harness's
-    /// background with the line as its prompt (`resume_bg`).
-    pub stopped: Option<WakeStopped>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WakeIdle {
-    Type,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WakeStopped {
-    ResumeBg,
-}
-
-/// What an attached session's screen shows of its input (`sessions.typing`):
-/// the line you type on (`input`, its first group what is typed there; the
-/// last line that matches is the one), and what says the session is busy.
-#[derive(Debug, Clone)]
-pub struct Typing {
-    pub input: regex::Regex,
-    pub busy: Option<ScreenMark>,
-}
-
-impl Typing {
-    /// What is typed on the input line of `screen` (a line a row), trimmed;
-    /// None where no line of it is the input line.
-    pub fn typed(&self, screen: &str) -> Option<String> {
-        screen
-            .lines()
-            .rev()
-            .find_map(|l| self.input.captures(l.trim_end_matches(' ')))
-            .map(|c| {
-                c.get(1)
-                    .map_or("", |m| m.as_str())
-                    .trim_matches(|ch: char| ch.is_whitespace())
-                    .to_string()
-            })
-    }
-
-    /// Whether `screen` says the session is busy.
-    pub fn busy(&self, screen: &str) -> bool {
-        self.busy.as_ref().is_some_and(|b| b.on(screen))
-    }
-}
-
-impl PartialEq for Typing {
-    fn eq(&self, other: &Self) -> bool {
-        self.input.as_str() == other.input.as_str() && self.busy == other.busy
-    }
-}
-
-impl Eq for Typing {}
-
-/// Regexes over the lines of a screen: it is showing something when a line
-/// matches one of them.
-#[derive(Debug, Clone)]
-pub struct ScreenMark {
-    patterns: Vec<regex::Regex>,
-}
-
-impl ScreenMark {
-    /// `what`, for an error, names where the patterns come from.
-    pub fn new(what: &str, patterns: &[String]) -> Result<ScreenMark> {
-        if patterns.is_empty() {
-            bail!("{what} names no pattern");
-        }
-        let patterns = patterns
-            .iter()
-            .map(|p| regex::Regex::new(p).map_err(|e| anyhow::anyhow!("{what}: `{p}`: {e}")))
-            .collect::<Result<_>>()?;
-        Ok(ScreenMark { patterns })
-    }
-
-    /// Whether the screen, as text a line a row, shows it.
-    pub fn on(&self, screen: &str) -> bool {
-        screen
-            .lines()
-            .any(|l| self.patterns.iter().any(|p| p.is_match(l.trim_end())))
-    }
-}
-
-impl PartialEq for ScreenMark {
-    fn eq(&self, other: &Self) -> bool {
-        self.patterns.len() == other.patterns.len()
-            && self
-                .patterns
-                .iter()
-                .zip(&other.patterns)
-                .all(|(a, b)| a.as_str() == b.as_str())
-    }
-}
-
-impl Eq for ScreenMark {}
 
 /// How an agent lists its own sessions: its binary with `args`, read by
 /// one of the `READERS`.
@@ -529,52 +376,11 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     if !remove.is_empty() && !remove.iter().any(|a| a.contains(ID)) {
         bail!("{name}.yaml: sessions.remove says nowhere where the id goes ({ID})");
     }
-    let agents_view = file
-        .agents_view
-        .map(|p| ScreenMark::new(&format!("{name}.yaml: sessions.agents_view"), &p))
-        .transpose()?;
-    let typing = file.typing.map(|t| compile_typing(name, t)).transpose()?;
     let rename = match file.rename {
         None => None,
-        Some(RenameFile {
-            rpc: Some(m),
-            typed: None,
-        }) if !m.trim().is_empty() => Some(Rename::Rpc(m)),
-        Some(RenameFile {
-            rpc: None,
-            typed: Some(t),
-        }) if t.contains(NAME) => Some(Rename::Type(t)),
-        Some(RenameFile { typed: Some(_), .. }) | Some(RenameFile { rpc: Some(_), .. }) => {
-            bail!("{name}.yaml: sessions.rename is one of `rpc: <method>` or `type: <line>` with {NAME} in it")
-        }
-        Some(_) => bail!("{name}.yaml: sessions.rename says neither `rpc` nor `type`"),
+        Some(RenameFile { rpc }) if !rpc.trim().is_empty() => Some(Rename::Rpc(rpc)),
+        Some(_) => bail!("{name}.yaml: sessions.rename.rpc names no method"),
     };
-    let wake = match file.wake {
-        None => Wake::default(),
-        Some(w) => Wake {
-            idle: match w.idle.as_deref() {
-                None => None,
-                Some("type") => Some(WakeIdle::Type),
-                Some(other) => bail!("{name}.yaml: sessions.wake.idle `{other}` is not one Relay has (type)"),
-            },
-            stopped: match w.stopped.as_deref() {
-                None => None,
-                Some("resume_bg") => Some(WakeStopped::ResumeBg),
-                Some(other) => {
-                    bail!("{name}.yaml: sessions.wake.stopped `{other}` is not one Relay has (resume_bg)")
-                }
-            },
-        },
-    };
-    let types = matches!(rename, Some(Rename::Type(_))) || wake.idle.is_some();
-    if types && (typing.is_none() || attach.is_empty()) {
-        bail!(
-            "{name}.yaml: typing into a session (sessions.rename.type, sessions.wake.idle) needs sessions.typing and sessions.attach"
-        );
-    }
-    if wake.stopped.is_some() && start.is_empty() {
-        bail!("{name}.yaml: sessions.wake.stopped needs sessions.start, its background");
-    }
     Ok(Sessions {
         hooks,
         list,
@@ -584,26 +390,8 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
         stop,
         ping,
         remove,
-        agents_view,
         rename,
-        wake,
-        typing,
     })
-}
-
-/// `sessions.typing`, checked: an input line with a group for what is typed
-/// on it, and the busy patterns.
-fn compile_typing(name: &str, t: TypingFile) -> Result<Typing> {
-    let input = regex::Regex::new(&t.input)
-        .map_err(|e| anyhow::anyhow!("{name}.yaml: sessions.typing.input: `{}`: {e}", t.input))?;
-    if input.captures_len() < 2 {
-        bail!("{name}.yaml: sessions.typing.input has no group for what is typed on it");
-    }
-    let busy = t
-        .busy
-        .map(|b| ScreenMark::new(&format!("{name}.yaml: sessions.typing.busy"), &b))
-        .transpose()?;
-    Ok(Typing { input, busy })
 }
 
 /// Whether `word` may stand in a hook's command as it is: an agent's or an
@@ -1213,19 +1001,12 @@ mod tests {
             (format!("{ok}  stop_choice: {{ words: stop }}\n"), "stop_choice"),
             (format!("{ok}  ping: [queue, \"{{id}}\"]\n"), "{text}"),
             (format!("{ok}  ping: [queue, \"{{text}}\"]\n"), "sessions.ping"),
-            (format!("{ok}  rename: {{ type: \"/rename\" }}\n"), "sessions.rename"),
-            (
-                format!("{ok}  rename: {{ rpc: x, type: \"{{name}}\" }}\n"),
-                "sessions.rename",
-            ),
-            (format!("{ok}  rename: {{}}\n"), "neither"),
+            (format!("{ok}  rename: {{ type: \"/rename {{name}}\" }}\n"), "type"),
+            (format!("{ok}  rename: {{ rpc: \" \" }}\n"), "sessions.rename"),
             (format!("{ok}  rename: {{ rpc: x, how: y }}\n"), "how"),
-            (format!("{ok}  wake: {{ idle: shout }}\n"), "shout"),
-            (format!("{ok}  wake: {{ stopped: shout }}\n"), "shout"),
-            (format!("{ok}  wake: {{ idle: type }}\n"), "sessions.typing"),
-            (format!("{ok}  wake: {{ stopped: resume_bg }}\n"), "sessions.start"),
-            (format!("{ok}  typing: {{ input: '^> .*$' }}\n"), "no group"),
-            (format!("{ok}  typing: {{ input: '(' }}\n"), "sessions.typing.input"),
+            (format!("{ok}  wake: {{ idle: type }}\n"), "wake"),
+            (format!("{ok}  typing: {{ input: '^> (.*)$' }}\n"), "typing"),
+            (format!("{ok}  agents_view: ['^x']\n"), "agents_view"),
             (format!("{ok}    settings: {{ \"ui..x\": true }}\n"), "ui..x"),
             (format!("{ok}    settings: {{ hooks.Stop: [] }}\n"), "hooks.Stop"),
             (ok.replace("    events:\n      Stop: idle\n", ""), "events"),

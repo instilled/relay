@@ -16,7 +16,6 @@ use crate::store::state;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
-use rl_detect::sessions::ScreenMark;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -70,12 +69,8 @@ pub struct Hand {
 pub enum To {
     /// A Relay-held session, straight to its holder.
     Held(Box<Meta>),
-    /// A harness's own attach command, run on a pty here; let go of when
-    /// its screen shows `back`, the harness's own list of its sessions.
-    Argv {
-        argv: Vec<String>,
-        back: Option<ScreenMark>,
-    },
+    /// A harness's own attach command, run on a pty here.
+    Argv { argv: Vec<String> },
     /// A harness run on a pty here, in `cwd`, where it begins a session of
     /// its own (Codex with no prompt: its TUI).
     Here { argv: Vec<String>, cwd: PathBuf },
@@ -103,6 +98,9 @@ pub struct Done {
     /// A row its harness has renamed (its key, and the name): the name is
     /// the harness's own now, and Relay keeps none of its own for it.
     pub renamed: Option<(String, String)>,
+    /// A row its harness carried on as a new one (the old key, the new):
+    /// what the list keeps for the old is the new one's, the old hidden.
+    pub carried: Option<(String, String)>,
 }
 
 /// How setup stands, as `setup::check` last said: what needs setting up, or
@@ -123,6 +121,7 @@ impl Done {
             ask_native: false,
             setup: None,
             renamed: None,
+            carried: None,
         }
     }
 
@@ -158,6 +157,9 @@ enum Slot {
 pub struct App {
     pub home: Home,
     pub config: Config,
+    /// When `config.json` was last read or written here: one changed since
+    /// (`rl mcp` carrying a row on) is read again (`heard_config`).
+    config_at: Option<std::time::SystemTime>,
     /// Every row, as the files and the harnesses last said.
     pub rows: Vec<Row>,
     /// The harnesses' own sessions, as their listers last said.
@@ -222,11 +224,13 @@ impl App {
     /// The list over `home`: its prefs from `config.json` and its rows from
     /// the files. Starts the badges asking, so it needs a runtime.
     pub fn new(home: Home) -> Result<App> {
+        let config_at = config_at(&home);
         let config = Config::load(&home)?;
         let badges = Badges::new(home.plugins_dir(), badges::EVERY, badges::WAIT);
         let mut app = App {
             home,
             config,
+            config_at,
             rows: Vec::new(),
             native: Said::default(),
             checkouts: Checkouts::new(),
@@ -269,6 +273,7 @@ impl App {
     /// last said. A project new to the list gets its checkout at once; the
     /// rest wait for the tick.
     pub fn reload(&mut self) {
+        self.heard_config();
         let held = sessions::list(&self.home);
         let hooked = state::list(&self.home, Timestamp::now());
         self.rows = sources::rows(&held, &hooked, &self.native.rows, &self.native.answered);
@@ -287,6 +292,20 @@ impl App {
             } else {
                 self.awaiting = Some(k);
             }
+        }
+    }
+
+    /// `config.json` read again where another (`rl mcp`) changed it since
+    /// it was last read or written here; one that does not read is passed
+    /// over.
+    fn heard_config(&mut self) {
+        let at = config_at(&self.home);
+        if at == self.config_at {
+            return;
+        }
+        self.config_at = at;
+        if let Ok(c) = Config::load(&self.home) {
+            self.config = c;
         }
     }
 
@@ -449,6 +468,7 @@ impl App {
                 if let Err(e) = self.config.save(&self.home) {
                     self.say(format!("config.json: {e:#}"));
                 }
+                self.config_at = config_at(&self.home);
             }
             Err(e) => {
                 change(&mut self.config.list);
@@ -537,4 +557,9 @@ impl App {
     pub fn title(&self) -> String {
         rows::headline(&self.lines(), &self.filter)
     }
+}
+
+/// When `config.json` in `home` was last changed; None where it is not.
+fn config_at(home: &Home) -> Option<std::time::SystemTime> {
+    std::fs::metadata(home.config_json()).and_then(|m| m.modified()).ok()
 }

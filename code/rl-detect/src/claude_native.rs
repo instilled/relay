@@ -11,8 +11,11 @@
 //! <name>`), and the profile's `resume` for carrying one on (`claude
 //! --resume <session> --bg`).
 
-use crate::harness::{self, CarryOn, Harness, NativeRow, NativeState, Pr, Started};
-use crate::mcp_entry::{How, Place};
+use crate::harness::{
+    self, Actions, Attach, Compat, Forked, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, Pr, RenameHow,
+    Renamed, Session, Start, Started, held,
+};
+use crate::mcp_entry::How;
 use crate::registry::{PROMPT, Profile, SESSION};
 use crate::sessions::{ID, NAME};
 use anyhow::{Context, Result, bail};
@@ -53,6 +56,7 @@ pub struct Claude {
     prompt: Vec<String>,
     /// Claude's config folder, where it is not the environment's.
     config: Option<PathBuf>,
+    info: Info,
 }
 
 impl Claude {
@@ -78,12 +82,17 @@ impl Claude {
                 profile.prompt.clone()
             },
             config: None,
+            info: Info {
+                mail_by_hooks: true,
+                ..held::info(profile, &bin.to_string_lossy(), true)
+            },
         })
     }
 
     /// The same, its binary on this machine or not.
     pub fn found(mut self, found: bool) -> Claude {
         self.found = found;
+        self.info.found = found;
         self
     }
 
@@ -129,38 +138,16 @@ impl Claude {
     }
 }
 
-impl Harness for Claude {
-    fn profile(&self) -> &Profile {
-        &self.profile
-    }
-
-    fn bin(&self) -> &str {
-        &self.bin
-    }
-
-    fn found(&self) -> bool {
-        self.found
-    }
-
-    fn lists(&self) -> bool {
-        true
-    }
-
-    fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
+impl Claude {
+    /// Its background sessions, as `claude agents --json --all` lists them,
+    /// each filled in from its job file; for no longer than `wait`.
+    pub fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
         let text = harness::run(&self.argv(&self.list), None, true, wait)?;
         let jobs = self.jobs_dir();
         // Its listing changed shape: drift, and what does not read is off
         // the list — its sessions open in a terminal still show, by hooks.
         if let Err(off) = shape(&text) {
-            crate::drift::notice(
-                crate::drift::Noticed::new(
-                    &self.harness,
-                    Some(Path::new(&self.bin)),
-                    AGENTS_JSON,
-                    "`claude agents --json` changed shape; sessions it lists may be missing",
-                )
-                .with_evidence(off),
-            );
+            self.listing_changed(&off);
         }
         Ok(rows(&text, jobs.as_deref())
             .unwrap_or_default()
@@ -172,71 +159,234 @@ impl Harness for Claude {
             .collect())
     }
 
-    fn attach_argv(&self, id: &str) -> Option<Vec<String>> {
+    /// What attaches this terminal to its session `id` (`claude attach
+    /// <id>`).
+    pub fn attach_argv(&self, id: &str) -> Vec<String> {
         let args: Vec<String> = self.attach.iter().map(|a| a.replace(ID, id)).collect();
-        Some(self.argv(&args))
+        self.argv(&args)
     }
 
-    /// In its background (`claude --resume <id> --bg`), where its profile
-    /// says how to start one there; else held, as its `resume` says.
-    fn carry_on(&self, session_id: &str) -> Option<CarryOn> {
-        match self.carry_on_argv(session_id) {
-            Some(argv) => Some(CarryOn::Background(argv)),
-            None => self
-                .profile
-                .resume_argv(self.bin.clone(), session_id)
-                .map(CarryOn::Held),
-        }
-    }
-
-    /// In its background (`claude --bg`), where its profile says how; else
-    /// held.
-    fn start(&self, cwd: &Path, name: Option<&str>, prompt: Option<&str>, before: &HashSet<String>) -> Result<Started> {
-        match self.start_argv(name, prompt) {
-            Some(argv) => self.carry_on_there(&argv, cwd, before).map(Started::Id),
-            None => Ok(Started::Held(self.profile.prompt_args(prompt.unwrap_or("")))),
-        }
-    }
-
-    fn carry_on_there(&self, argv: &[String], cwd: &Path, before: &HashSet<String>) -> Result<String> {
-        begin(|wait| self.list_within(wait), argv, cwd, before, LISTED_WAIT)
-    }
-
-    fn stops(&self, row: &NativeRow) -> bool {
-        !self.stop.is_empty() && !row.state.state.is_terminal()
-    }
-
-    fn stop(&self, id: &str, cwd: &Path) -> Result<()> {
+    /// Stops its session `id`, in `cwd` (`claude stop <id>`).
+    fn stop_id(&self, id: &str, cwd: &Path) -> Result<()> {
         let argv = self.stop_argv(id).context("its profile says no `stop`")?;
         harness::run(&argv, Some(cwd), false, harness::LIST_WAIT).map(drop)
     }
+}
 
-    /// Through `claude mcp add|remove --scope user`, which owns its file.
-    fn mcp(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Place>> {
+/// What Claude says of one that is busy, or waits on you: its hooks tell it.
+const BUSY: &str = "claude is busy; it will see it at the end of its turn";
+const WAITS: &str = "claude waits on you; it will see it once you answer";
+const ATTACHED: &str = "you are attached to it; it will see it at your next prompt";
+
+impl Harness for Claude {
+    fn info(&self) -> &Info {
+        &self.info
+    }
+
+    fn sessions(&self, wait: Duration) -> harness::Listed {
+        self.list_within(wait).into()
+    }
+
+    /// In its background (`claude --bg`, or `claude --resume <session>
+    /// --bg` to carry one on), named with `-n`, the prompt last: the id it
+    /// is listed by once Claude lists it. `words`: held, as given; where
+    /// its profile says no `start`, held too.
+    fn start(&self, s: &Start) -> Result<Started> {
+        if let Some(words) = &s.words {
+            return Ok(Started::Held(words.clone()));
+        }
+        let Some(argv) = self.bg_argv(s.resume.as_deref(), s.name.as_deref(), s.prompt.as_deref()) else {
+            return held::start(&self.profile, s);
+        };
+        // What it lists already is not what this begins.
+        let before: HashSet<String> = self
+            .list_within(BEFORE_WAIT)
+            .map(|rows| rows.into_iter().map(|r| r.id).collect())
+            .unwrap_or_default();
+        begin(|w| self.list_within(w), &argv, &s.cwd, &before, LISTED_WAIT).map(Started::Background)
+    }
+
+    /// Its own: `claude attach <id>`. One open in another terminal, at rest,
+    /// once Claude has listed what runs in its background (else it may run
+    /// there already): carried on there, with the name you gave it.
+    fn attach(&self, s: &Session) -> Attach {
+        match s.owner {
+            Owner::Relay { .. } => held::attach(&self.profile, s),
+            Owner::Own => Attach::Argv(self.attach_argv(&s.id)),
+            Owner::Elsewhere { .. } if self.start.is_empty() || self.resume.is_empty() => {
+                held::attach(&self.profile, s)
+            }
+            Owner::Elsewhere { listed } if listed && s.state == RunState::Idle => Attach::CarryOn(Start {
+                cwd: s.cwd.clone(),
+                name: s.relay_name.clone(),
+                resume: Some(s.session_id.clone()),
+                ..Start::default()
+            }),
+            Owner::Elsewhere { .. } => Attach::No,
+        }
+    }
+
+    /// A name you give one is Relay's until Relay next starts it or carries
+    /// it on (`-n`): Claude has no way to rename one from outside.
+    fn actions(&self, s: &Session) -> Actions {
+        match s.owner {
+            Owner::Relay { .. } => held::actions(s),
+            Owner::Own => Actions {
+                stop: !self.stop.is_empty() && !s.state.is_terminal(),
+                remove: self.profile.sessions.as_ref().is_some_and(|x| !x.remove.is_empty()),
+                rename: RenameHow::AtNextStart,
+            },
+            Owner::Elsewhere { .. } => Actions {
+                rename: RenameHow::AtNextStart,
+                ..Actions::NONE
+            },
+        }
+    }
+
+    fn stop(&self, s: &Session) -> Result<()> {
+        match s.owner {
+            Owner::Own => self.stop_id(&s.id, &s.cwd),
+            _ => held::stop(s),
+        }
+    }
+
+    fn remove(&self, s: &Session) -> Result<()> {
+        match s.owner {
+            Owner::Own => harness::remove_id(&self.profile, &self.bin, &s.id, &s.cwd),
+            _ => held::remove(s),
+        }
+    }
+
+    fn rename(&self, s: &Session, name: &str) -> Renamed {
+        match s.owner {
+            Owner::Relay { .. } => Renamed::RelayOnly(None),
+            _ if name.trim().is_empty() => Renamed::RelayOnly(None),
+            _ => Renamed::AtNextStart,
+        }
+    }
+
+    /// One working, or waiting on you, hears of it from its hooks; so does
+    /// one you are attached to. One idle is stopped and carried on in its
+    /// background with the mail's line as its prompt; one that has ended is
+    /// carried on so. Held or elsewhere: its hooks.
+    fn notify(&self, s: &Session, mail: &Mail) -> Notified {
+        if s.owner != Owner::Own {
+            return Notified::ByHooks(None);
+        }
+        let woke = match s.state {
+            RunState::Working | RunState::Starting => return Notified::ByHooks(Some(BUSY.into())),
+            RunState::NeedsInput => return Notified::ByHooks(Some(WAITS.into())),
+            RunState::Idle if s.attached => return Notified::ByHooks(Some(ATTACHED.into())),
+            RunState::Idle => self
+                .stop_id(&s.id, &s.cwd)
+                .and_then(|()| self.wake(s, mail))
+                .map_err(|e| format!("claude wasn't woken: {e:#}")),
+            st if st.is_terminal() => self
+                .wake(s, mail)
+                .map_err(|e| format!("claude wasn't carried on: {e:#}")),
+            _ => Err(format!("claude is {}; nothing wakes it from there", s.words)),
+        };
+        match woke {
+            Ok(forked) => Notified::Woken(forked),
+            Err(why) if mail.from_harness == self.harness && !s.name.is_empty() => Notified::Failed(format!(
+                "{why}\n{} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\").",
+                s.name
+            )),
+            Err(why) => Notified::Failed(why),
+        }
+    }
+
+    /// Its MCP server through `claude mcp add|remove --scope user`, which
+    /// owns its file.
+    fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>> {
         let how = How::ClaudeCli {
-            cli: harness::cli_name(self),
+            cli: harness::cli_name(&self.profile),
             bin: self.found.then(|| PathBuf::from(&self.bin)),
         };
-        harness::mcp_place(self, env, how)
+        held::setup(&self.profile, env, how)
     }
 
     /// Claude Code's conversation id, the same one its hooks report.
-    fn caller_id_var(&self) -> Option<&'static str> {
-        Some(SESSION_ID_VAR)
+    fn caller(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        env(SESSION_ID_VAR).filter(|v| !v.is_empty())
     }
 
-    /// Claude Code has no way to tell one of its sessions anything from
-    /// outside; its hooks carry the news instead (`rl hook`).
-    fn mail_by_hooks(&self) -> bool {
-        true
+    /// `claude agents --json` read for its shape.
+    fn check(&self) -> Compat {
+        let mut c = Compat {
+            version: self.info.version(),
+            off: Vec::new(),
+        };
+        if !self.found {
+            return c;
+        }
+        if let Ok(text) = harness::run(&self.argv(&self.list), None, true, harness::LIST_WAIT)
+            && let Err(off) = shape(&text)
+        {
+            self.listing_changed(&off);
+            c.off.push((
+                AGENTS_JSON.into(),
+                format!("`claude agents --json` changed shape: {off}"),
+            ));
+        }
+        c
+    }
+}
+
+/// How long a start asks what Claude lists already.
+const BEFORE_WAIT: Duration = Duration::from_secs(5);
+
+impl Claude {
+    /// What starts a session in its background: carrying the conversation
+    /// `resume` on, where given (`claude --resume <session> --bg`), named
+    /// and prompted where given. None: its profile says no `start` (or no
+    /// `resume`, to carry one on).
+    pub fn bg_argv(&self, resume: Option<&str>, name: Option<&str>, prompt: Option<&str>) -> Option<Vec<String>> {
+        let Some(session) = resume else {
+            return self.start_argv(name, prompt);
+        };
+        let mut argv = self.carry_on_argv(session)?;
+        if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+            argv.extend(self.name.iter().map(|a| a.replace(NAME, n.trim())));
+        }
+        if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
+            argv.extend(self.prompt.iter().map(|a| a.replace(PROMPT, p)));
+        }
+        Some(argv)
     }
 
-    /// `claude agents` lists its background sessions by the name `name`,
-    /// which Claude's `SendMessage` addresses.
-    fn wake_advice(&self, name: &str) -> Option<String> {
-        Some(format!(
-            "{name} is a Claude session — to wake it now, also SendMessage it (\"relay mail waiting: call inbox\")."
-        ))
+    /// Carries `s` on in its background, the mail's line its prompt, with
+    /// the name you gave it.
+    /// Carries `s` on in its background, the mail's line its prompt, and
+    /// says the new session that began, once Claude lists it (None: not
+    /// within `LISTED_WAIT`; it was started all the same).
+    fn wake(&self, s: &Session, mail: &Mail) -> Result<Option<Forked>> {
+        let line = mail.line();
+        let argv = self
+            .bg_argv(Some(&s.session_id), s.relay_name.as_deref(), Some(&line))
+            .context("its profile says no way to carry one on in its background")?;
+        let printed = harness::run(&argv, Some(&s.cwd), false, harness::START_WAIT)?;
+        let before = HashSet::from([s.id.clone()]);
+        let ids = printed_ids(&argv, &printed);
+        Ok(
+            listed(|w| self.list_within(w), &ids, &s.cwd, &before, LISTED_WAIT).map(|r| Forked {
+                id: r.id,
+                session_id: r.session_id,
+            }),
+        )
+    }
+
+    /// Its listing changed shape: drift.
+    fn listing_changed(&self, off: &str) {
+        crate::drift::notice(
+            crate::drift::Noticed::new(
+                &self.harness,
+                Some(Path::new(&self.bin)),
+                AGENTS_JSON,
+                "`claude agents --json` changed shape; sessions it lists may be missing",
+            )
+            .with_evidence(off),
+        );
     }
 }
 
@@ -286,7 +436,20 @@ pub fn begin(
     listed: Duration,
 ) -> Result<String> {
     let printed = harness::run(argv, Some(cwd), false, harness::START_WAIT)?;
-    let ids = started_ids(&printed);
+    let ids = printed_ids(argv, &printed);
+    match self::listed(list, &ids, cwd, before, listed) {
+        Some(r) => Ok(r.id),
+        None => {
+            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
+            bail!("{}", last.map_or("it printed nothing", str::trim));
+        }
+    }
+}
+
+/// The ids `argv` printed for what it started (`started_ids`); none is
+/// drift.
+fn printed_ids(argv: &[String], printed: &str) -> Vec<String> {
+    let ids = started_ids(printed);
     if ids.is_empty() {
         crate::drift::notice(crate::drift::Noticed::new(
             crate::user_hooks::CLAUDE,
@@ -295,22 +458,35 @@ pub fn begin(
             "`claude --bg` printed no session id",
         ));
     }
+    ids
+}
+
+/// The session one of `ids` names once `list` has it, in `cwd` and not
+/// among `before`; asked for up to `listed`. None: not so listed in time.
+fn listed(
+    list: impl Fn(Duration) -> Result<Vec<NativeRow>>,
+    ids: &[String],
+    cwd: &Path,
+    before: &HashSet<String>,
+    listed: Duration,
+) -> Option<NativeRow> {
+    if ids.is_empty() {
+        return None;
+    }
     let deadline = Instant::now() + listed;
     loop {
         // The whole loop, its listings too, is bounded by `listed`.
         let left = deadline.saturating_duration_since(Instant::now());
-        if !ids.is_empty()
-            && !left.is_zero()
-            && let Ok(rows) = list(left.min(harness::LIST_WAIT))
-            && let Some(id) = ids
-                .iter()
-                .find(|id| !before.contains(*id) && rows.iter().any(|r| r.id == **id && harness::same_dir(&r.cwd, cwd)))
-        {
-            return Ok(id.clone());
+        if left.is_zero() {
+            return None;
         }
-        if ids.is_empty() || Instant::now() >= deadline {
-            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
-            bail!("{}", last.map_or("it printed nothing", str::trim));
+        if let Ok(rows) = list(left.min(harness::LIST_WAIT))
+            && let Some(r) = ids.iter().find_map(|id| {
+                rows.iter()
+                    .find(|r| !before.contains(id) && r.id == *id && harness::same_dir(&r.cwd, cwd))
+            })
+        {
+            return Some(r.clone());
         }
         std::thread::sleep(LISTED_EVERY);
     }
@@ -926,20 +1102,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let extra = r#"[{"id":"b1","cwd":"/w","kind":"background","sessionId":"s1","state":"working","mood":"new"}]"#;
         let c = listing_claude(tmp.path(), extra);
-        let (rows, noticed) = crate::drift::capture(|| c.list().unwrap());
+        let (rows, noticed) = crate::drift::capture(|| c.list_within(harness::LIST_WAIT).unwrap());
         assert_eq!(rows.len(), 1);
         assert!(noticed.is_empty(), "{noticed:?}");
 
         let gone = r#"[{"agentId":"b1","cwd":"/w","kind":"background","conversation":"s1","state":"working"}]"#;
         let c = listing_claude(tmp.path(), gone);
-        let (rows, noticed) = crate::drift::capture(|| c.list().unwrap());
+        let (rows, noticed) = crate::drift::capture(|| c.list_within(harness::LIST_WAIT).unwrap());
         assert!(rows.is_empty(), "off the list");
         assert_eq!(noticed.len(), 1);
         assert_eq!(noticed[0].check, AGENTS_JSON);
         assert_eq!(noticed[0].evidence.as_deref(), Some("entries without id, sessionId"));
 
         let c = listing_claude(tmp.path(), "{\"agents\": []}");
-        let (rows, noticed) = crate::drift::capture(|| c.list());
+        let (rows, noticed) = crate::drift::capture(|| c.list_within(harness::LIST_WAIT));
         assert!(rows.unwrap().is_empty(), "not an error: the list goes on without them");
         assert_eq!(noticed[0].evidence.as_deref(), Some("not a list"));
     }
@@ -968,7 +1144,7 @@ mod tests {
     #[test]
     fn it_runs_what_the_profile_says() {
         let c = claude();
-        assert_eq!(c.attach_argv("ab12cd34").unwrap(), ["claude", "attach", "ab12cd34"]);
+        assert_eq!(c.attach_argv("ab12cd34"), ["claude", "attach", "ab12cd34"]);
         assert_eq!(c.start_argv(None, None).unwrap(), ["claude", "--bg"]);
         assert_eq!(
             c.start_argv(Some("fix it"), Some("fix the login")).unwrap(),
@@ -982,15 +1158,18 @@ mod tests {
         );
         assert_eq!(c.carry_on_argv("s-1").unwrap(), ["claude", "--resume", "s-1", "--bg"]);
         assert_eq!(c.stop_argv("ab12cd34").unwrap(), ["claude", "stop", "ab12cd34"]);
-        let mut row = listed_at("ab12cd34", Path::new("/w"));
-        assert!(c.stops(&row), "one still going");
-        row.state.state = RunState::Finished;
-        assert!(!c.stops(&row), "nothing left to stop");
+        let mut row = Session::own(&listed_at("ab12cd34", Path::new("/w")));
+        assert!(c.actions(&row).stop, "one still going");
+        row.state = RunState::Finished;
+        assert!(!c.actions(&row).stop, "nothing left to stop");
+        let words = Start {
+            words: Some(vec!["--model".into(), "x".into()]),
+            ..Start::default()
+        };
         assert!(
-            !c.never_held(),
+            matches!(c.start(&words), Ok(Started::Held(_))),
             "a Claude Relay starts in a terminal of its own is held"
         );
-        assert_eq!(c.ping_argv("ab12cd34", "x"), None, "nothing tells one from outside");
         // What it says to attach to goes first, then any other likely word.
         assert_eq!(
             started_ids("build deadbeef from cafe0001 · claude attach 9be483ad\n"),
@@ -1023,7 +1202,7 @@ mod tests {
         let c = Claude::of(r.profile("claude").unwrap(), bin)
             .unwrap()
             .with_config_dir(fixtures());
-        let rows = c.list().unwrap();
+        let rows = c.list_within(harness::LIST_WAIT).unwrap();
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0].summary.as_deref(), Some("the summary of 8af077cd"));
     }
@@ -1035,7 +1214,7 @@ mod tests {
         let r = Registry::builtin();
         let p = r.profile("claude").unwrap();
         let bin = crate::registry::find_bin(&p.bins).expect("claude on PATH");
-        let rows = Claude::of(p, bin).unwrap().list().unwrap();
+        let rows = Claude::of(p, bin).unwrap().list_within(harness::LIST_WAIT).unwrap();
         for row in &rows {
             assert_eq!(row.id.len(), 8, "{row:?}");
             assert!(row.cwd.is_absolute(), "{row:?}");

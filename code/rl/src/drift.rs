@@ -503,17 +503,23 @@ pub fn report(dir: &Path, dry_run: bool, input: &mut dyn BufRead, out: &mut dyn 
     Ok(())
 }
 
-/// `rl doctor`: the harnesses found and their versions, then every drift
-/// event, reported or not, with its count.
+/// `rl doctor`: the agents found, their versions and how each stands
+/// against what Relay uses of it (`Harness::check`: what is off is noticed
+/// as drift too), then every drift event, reported or not, with its count.
 pub fn doctor(home: &Home, out: &mut dyn Write) -> Result<()> {
     writeln!(out, "relay {RELAY_VERSION} ({RELAY_COMMIT})")?;
     let registry = rl_detect::Registry::builtin();
     for h in rl_detect::harness::on_path(&registry) {
-        if !h.found() || h.kind() != rl_core::state::RunKind::Agent {
+        let i = h.info();
+        if !i.found || i.kind != rl_core::state::RunKind::Agent {
             continue;
         }
-        let v = rl_detect::drift::version(Path::new(h.bin())).unwrap_or_else(|| "version unknown".into());
-        writeln!(out, "{} {v} · {}", h.name(), h.bin())?;
+        let c = h.check();
+        let v = c.version.clone().unwrap_or_else(|| "version unknown".into());
+        writeln!(out, "{} {v} · {}", i.name, i.bin)?;
+        for (check, what) in &c.off {
+            writeln!(out, "  off: {what} [{check}]")?;
+        }
     }
     let events = load(&dir(home));
     if events.is_empty() {

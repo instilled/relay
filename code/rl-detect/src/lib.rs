@@ -22,8 +22,7 @@
 //! - [`settings`]: keys `rl setup` sets in a harness's own global config.
 //! - [`drift`]: an expectation of a harness that failed in real use,
 //!   noticed where it failed and kept by the sink `rl` installs.
-//! - [`typing`]: one line typed into an idle session of a harness's own,
-//!   through its attach on a hidden pty (a rename, a wake for mail).
+//! - [`setup`]: what `rl setup` does for one harness, part by part.
 
 pub mod claude;
 pub mod claude_native;
@@ -34,7 +33,7 @@ pub mod mcp_entry;
 pub mod registry;
 pub mod sessions;
 pub mod settings;
-pub mod typing;
+pub mod setup;
 pub mod user_hooks;
 
 pub use rl_session::detect::{ansi, heuristics as pty};
