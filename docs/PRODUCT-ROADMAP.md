@@ -6,18 +6,20 @@ daemon: `rl`, `rl-session` holders and plain files. What is done is in git.
 
 ## Now
 
-* One intent-level `Harness` interface — info, sessions, start, attach, actions, stop, remove,
-  rename, notify, setup, caller, check — each harness binding its own steps. Stable contracts only
-  (documented CLI, JSON, Codex's schema): no screen reading or typing. An idle Claude is woken by
-  `claude stop` + `claude --resume <id> --bg`; the ← screen watch goes.
+* Nothing in flight.
 
 Last landed (2026-11-12): `ctrl+j` adds a line (#221); `ctrl+x` asks stop / remove the same for
 every harness, Codex removing by `thread/delete` (#222); empty Codex threads not listed (#223); a
-close always ends a held run (#224); the docs slimmed (#225); `/project <folder>` (#226).
+close always ends a held run (#224); the docs slimmed (#225); `/project <folder>` (#226); one
+intent-level `Harness` interface on stable contracts only — no typing, no screen watch; an idle
+Claude woken by `claude stop` + `--resume --bg`, its row and mail carried to the forked session
+(#227).
 
 ## Next
 
-* Nothing queued; see Later.
+* The list ignored SIGTERM once (2026-11-13, a #226 build, no child): find which state doesn't
+  listen for the stop, and make every state leave cleanly on it.
+* Verify live that Claude's hooks fire on a session woken with `--resume --bg`.
 
 ## Later
 
