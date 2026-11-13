@@ -30,8 +30,10 @@ reply and a short demo.
   watching a pile of agents, today a full attach and `ctrl+\` each time.
 * An install without Rust: release binaries for macOS and Linux (`rl`, `rl-session`) built on a
   tag, a one-line install in the README; the repo public. Unsigned for the beta: `curl` and a
-  Homebrew tap set no quarantine, and Rust's linker ad-hoc signs arm64. A browser download gets
-  the "cannot be verified" dialog; the README gives `xattr -d com.apple.quarantine rl rl-session`.
+  Homebrew formula (not a cask) set no quarantine. arm64 needs an ad-hoc signature or it is
+  `Killed: 9`: Apple's linker adds one when built on a macOS runner (not when cross-compiled), and
+  the release checks `codesign -v`. Confirm live that an installed binary carries no quarantine
+  (`xattr`). A browser download gets the "cannot be verified" dialog; the README gives `xattr -d com.apple.quarantine rl rl-session`.
 * Verify live before strangers hit it: Relay starting the Codex daemon, `/stop` on a Codex turn
   (`turn/interrupt`), `thread/delete`, the Gemini MCP entry.
 * A 60-second demo: a Claude and a Codex on the list, one asks the other to review, the reply
