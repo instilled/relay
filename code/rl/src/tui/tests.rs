@@ -828,14 +828,10 @@ async fn enter_hands_a_held_session_over_and_a_native_one_to_its_harness() {
     press(&mut app, KeyCode::Enter);
     let hand = app.hand.take().expect("handed over");
     assert_eq!(hand.key, NATIVE);
-    let super::app::To::Argv { argv, back } = &hand.to else {
+    let super::app::To::Argv { argv } = &hand.to else {
         panic!("{:?}", hand.to);
     };
     assert_eq!(argv[1..], ["attach", "ab12cd34"], "claude attach <id>");
-    // Its agents view, should it come up in the attach, gives the list back.
-    let back = back.as_ref().expect("claude's agents view is known");
-    assert!(back.on("~/shop\n\n❯ describe a task for a new session\n  enter to open"));
-    assert!(!back.on("❯ fix the login\n  ⎿ ❯ describe a task for a new session"));
 }
 
 /// What the harness's stand-in was last run with in `dir` (`sources`).
@@ -1188,7 +1184,6 @@ async fn a_carry_on_done_while_a_name_is_typed_does_not_take_the_terminal() {
         hand: Some(super::app::Hand {
             to: super::app::To::Argv {
                 argv: vec!["claude".into(), "attach".into(), "ab12cd34".into()],
-                back: None,
             },
             title: "fix the login".into(),
             key: NATIVE.into(),
@@ -1579,7 +1574,7 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
     let names = Config::load(&f.home).unwrap().list.names;
     assert_eq!(names.get(NATIVE).map(String::as_str), Some("login box"));
     assert!(
-        shown(&app).contains("named in relay · claude still calls it fix the login"),
+        shown(&app).contains("named in relay · claude takes it at its next start"),
         "{}",
         shown(&app)
     );
@@ -1607,7 +1602,7 @@ async fn a_harnesss_session_is_named_in_relay_with_its_own_name_dim_beside_and_b
 }
 
 #[tokio::test]
-async fn an_idle_claude_is_renamed_in_claude_too_and_a_busy_one_only_in_relay() {
+async fn a_claude_name_stays_in_relay_till_claude_takes_it_at_its_next_start() {
     let f = fixture();
     let mut app = list(&f).await;
     let mut idle = waiting(&f.repo);
@@ -1618,42 +1613,23 @@ async fn an_idle_claude_is_renamed_in_claude_too_and_a_busy_one_only_in_relay() 
     app.set_native(vec![idle.clone()]);
     on(&mut app, NATIVE);
     run(&mut app, "/rename login box");
+    app.finish().await;
+    assert!(app.work.is_empty(), "nothing run: Claude has no rename from outside");
     assert!(
-        shown(&app).contains("renaming it login box in claude…"),
+        shown(&app).contains("named in relay · claude takes it at its next start"),
         "{}",
         shown(&app)
     );
-    app.finish().await;
-    assert_eq!(
-        std::fs::read_to_string(f.repo.join("typed")).unwrap(),
-        "/rename login box\n",
-        "typed into it, through its attach"
-    );
-    assert!(
-        shown(&app).contains("renamed to login box · in claude too"),
-        "{}",
-        shown(&app)
-    );
-    assert!(
-        Config::load(&f.home).unwrap().list.names.is_empty(),
-        "the name is claude's own now"
-    );
-    let row = row_of(&shown(&app), "login box").to_string();
-    assert!(!row.contains("(fix the login)"), "{row}");
-    // Busy: the name is Relay's, and nothing is typed; once claude calls it
-    // so too (renamed there by you), Relay's goes.
-    std::fs::remove_file(f.repo.join("typed")).unwrap();
-    app.set_native(vec![waiting(&f.repo)]);
-    run(&mut app, "/rename the box");
-    app.finish().await;
-    assert!(!f.repo.join("typed").exists(), "nothing typed into a busy one");
-    assert!(shown(&app).contains("named in relay · claude still calls it fix the login"));
+    assert!(!f.repo.join("typed").exists(), "nothing typed into it");
     let names = Config::load(&f.home).unwrap().list.names;
-    assert_eq!(names.get(NATIVE).map(String::as_str), Some("the box"));
-    let mut renamed = waiting(&f.repo);
-    renamed.name = "the box".into();
+    assert_eq!(names.get(NATIVE).map(String::as_str), Some("login box"));
+    // Carried on with it (`-n`), Claude calls it so: Relay's goes.
+    let mut renamed = idle;
+    renamed.name = "login box".into();
     app.set_native(vec![renamed]);
     assert!(Config::load(&f.home).unwrap().list.names.is_empty());
+    let row = row_of(&shown(&app), "login box").to_string();
+    assert!(!row.contains("(fix the login)"), "{row}");
 }
 
 #[tokio::test]
@@ -1661,8 +1637,13 @@ async fn a_codex_thread_is_renamed_on_its_daemon_and_keeps_no_relay_name() {
     let f = fixture();
     let mut app = list(&f).await;
     let codex = crate::sources::harness("codex").unwrap();
-    let started = codex.start(&f.repo, None, Some("fix it"), &Default::default()).unwrap();
-    let rl_detect::harness::Started::Id(id) = started else {
+    let start = rl_detect::harness::Start {
+        cwd: f.repo.clone(),
+        prompt: Some("fix it".into()),
+        ..Default::default()
+    };
+    let started = codex.start(&start).unwrap();
+    let rl_detect::harness::Started::Background(id) = started else {
         panic!("{started:?}");
     };
     let mut thread = waiting(&f.repo);
@@ -2485,4 +2466,62 @@ async fn tab_completes_the_folder_of_slash_project_under_the_rows_folder() {
     assert_eq!(app.cmd.ghost.as_deref(), Some("rc/"), "folders only");
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.cmd.line.text(), "/project src/");
+}
+
+#[tokio::test]
+async fn a_row_carried_on_as_a_new_one_elsewhere_shows_once_under_the_new_key_with_what_you_kept() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    ctrl(&mut app, 't');
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // `rl mcp` woke it as a new session and carried the row over.
+    let new = "n:claude:9f1e2d3c";
+    let mut c = Config::load(&f.home).unwrap();
+    c.list.names.insert(NATIVE.into(), "login box".into());
+    c.list.carry(NATIVE, new, Timestamp::now());
+    c.save(&f.home).unwrap();
+    let old = NativeRow {
+        state: NativeState {
+            words: "completed".into(),
+            state: RunState::Finished,
+        },
+        ..waiting(&f.repo)
+    };
+    let carried = NativeRow {
+        id: "9f1e2d3c".into(),
+        session_id: "s-2".into(),
+        name: "fix the login".into(),
+        ..waiting(&f.repo)
+    };
+    app.set_native(vec![old, carried]);
+    let s = shown(&app);
+    assert_eq!(s.matches("login box").count(), 1, "one row: {s}");
+    assert!(!app.keys().iter().any(|k| k == NATIVE), "the old one hidden");
+    assert_eq!(app.keys()[0], new, "pinned, as the old one was: {s}");
+    assert_eq!(app.prefs().pins, [new]);
+}
+
+#[tokio::test]
+async fn a_conversation_carried_on_from_another_terminal_takes_what_you_kept_for_its_row() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let (old, new) = ("o:claude:s-9", "n:claude:9f1e2d3c");
+    app.change_prefs(|p| {
+        p.names.insert(old.into(), "login box".into());
+        p.colors.insert(old.into(), "blue".into());
+        p.pins.push(old.into());
+    });
+    app.done(super::app::Done {
+        carried: Some((old.into(), new.into())),
+        ..super::app::Done::said("login box carries on in claude's background")
+    });
+    let p = Config::load(&f.home).unwrap().list;
+    assert_eq!(p.names.get(new).map(String::as_str), Some("login box"));
+    assert_eq!(p.colors.get(new).map(String::as_str), Some("blue"));
+    assert_eq!(p.pins, [new]);
+    assert!(
+        p.hidden.iter().any(|h| h.key == old),
+        "the old row hidden, as /hide does"
+    );
 }

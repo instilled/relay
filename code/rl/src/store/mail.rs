@@ -92,6 +92,72 @@ pub fn set_told(home: &Home, key: &str, at: Timestamp) -> io::Result<()> {
     rl_core::atomic::write(&dir.join(TOLD), format!("{at}\n").as_bytes())
 }
 
+/// Where a folder keeps the keys its session had before it was carried on
+/// as a new one (`moved`), a key a line.
+const WAS: &str = ".was";
+/// Where a folder keeps the key its session was carried on under.
+const MOVED: &str = ".moved";
+
+/// The session `from` carries on as `to` (Claude's `--resume … --bg`
+/// begins a new session, with a new conversation id): `to` reads what is
+/// left under `from` and under every key `from` had (`with_was`), and what
+/// is sent to `from` from now on goes to `to` (`now`).
+pub fn moved(home: &Home, from: &str, to: &str) -> io::Result<()> {
+    if from == to {
+        return Ok(());
+    }
+    let mut was: Vec<String> = Vec::new();
+    let all = std::iter::once(from.to_string())
+        .chain(self::was(home, from))
+        .chain(self::was(home, to));
+    for k in all {
+        if k != to && !was.contains(&k) {
+            was.push(k);
+        }
+    }
+    let dir = home.mail_dir().join(component(to));
+    std::fs::create_dir_all(&dir)?;
+    rl_core::atomic::write(&dir.join(WAS), (was.join("\n") + "\n").as_bytes())?;
+    let old = home.mail_dir().join(component(from));
+    std::fs::create_dir_all(&old)?;
+    rl_core::atomic::write(&old.join(MOVED), format!("{to}\n").as_bytes())
+}
+
+/// The keys the session `key` had before it was carried on as itself.
+pub fn was(home: &Home, key: &str) -> Vec<String> {
+    std::fs::read_to_string(home.mail_dir().join(component(key)).join(WAS))
+        .map(|t| t.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// `keys` and every key their sessions had before (`was`), each once.
+pub fn with_was(home: &Home, keys: Vec<String>) -> Vec<String> {
+    let mut all = Vec::new();
+    for k in keys {
+        let before = was(home, &k);
+        for k in std::iter::once(k).chain(before) {
+            if !all.contains(&k) {
+                all.push(k);
+            }
+        }
+    }
+    all
+}
+
+/// The key the session `key` carries on under now: `key`, or where it was
+/// carried on as another, that one's (followed a few times at most).
+pub fn now(home: &Home, key: &str) -> String {
+    let mut key = key.to_string();
+    for _ in 0..16 {
+        let next = std::fs::read_to_string(home.mail_dir().join(component(&key)).join(MOVED));
+        match next.as_deref().map(str::trim) {
+            Ok(n) if !n.is_empty() && n != key => key = n.to_string(),
+            _ => break,
+        }
+    }
+    key
+}
+
 /// The message files in `dir`: none where it is not there.
 fn mail_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     match std::fs::read_dir(dir) {
@@ -320,6 +386,24 @@ fn claim_file(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_session_carried_on_twice_reads_every_key_it_had_and_mail_to_any_goes_to_the_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("relay"));
+        assert_eq!(now(&home, "conv-1"), "conv-1");
+        moved(&home, "conv-1", "conv-2").unwrap();
+        moved(&home, "conv-2", "conv-3").unwrap();
+        assert_eq!(now(&home, "conv-1"), "conv-3");
+        assert_eq!(now(&home, "conv-2"), "conv-3");
+        assert_eq!(was(&home, "conv-3"), ["conv-2", "conv-1"]);
+        assert_eq!(
+            with_was(&home, vec!["conv-3".into(), "name".into()]),
+            ["conv-3", "conv-2", "conv-1", "name"]
+        );
+        moved(&home, "x", "x").unwrap();
+        assert_eq!(now(&home, "x"), "x", "never onto itself");
+    }
 
     fn msg(from: &str, to: &str, text: &str, s: i64) -> Message {
         Message {
