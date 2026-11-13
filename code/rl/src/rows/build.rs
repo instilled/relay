@@ -89,10 +89,9 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
     // purpose, so no toggle takes them away. Only the filter does.
     let mut pinned: Vec<&'a Row> = Vec::new();
     // What you hid is off the list unless `show_hidden` brings it back inline,
-    // in its place; what of it has come to need you since comes through,
-    // above the projects, whenever hidden is off. By how it ranks, then
-    // since when it has needed you, then its key.
-    let mut through: Vec<(u8, Option<Timestamp>, String, &'a Row)> = Vec::new();
+    // in its place. One that needs you stays off too: its project's header
+    // hints at it, so the list is what the toggle says and nothing urgent is
+    // lost.
     // Per project, and per heading, how many of its rows need you but are
     // off the list now. Its header hints at them.
     let mut buried: HashMap<PathBuf, usize> = HashMap::new();
@@ -122,17 +121,8 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
             ))
         };
         let kept = keeps(r, prefs.show_agents, prefs.show_shells);
-        if let Some(since) = since
-            && !prefs.show_hidden
-        {
-            if comes_through(r, since) && kept {
-                if hits() {
-                    through.push((rank::score(r), r.state_at, r.key.clone(), r));
-                }
-            } else if wants(r.state) {
-                // Hidden while it already needed you, so it does not come
-                // through — or it would, but a toggle takes it off: its
-                // project hints it is there.
+        if since.is_some() && !prefs.show_hidden {
+            if wants(r.state) {
                 bury(&project, r);
             }
             continue;
@@ -159,14 +149,8 @@ pub fn build<'a>(rows: &'a [Row], cx: &Context<'_>) -> Vec<Line<'a>> {
             None => groups.push((project, vec![r])),
         }
     }
-    through.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
     pinned.sort_by_key(|r| prefs.pins.iter().position(|p| *p == r.key));
-    let mut lines: Vec<Line<'a>> = through
-        .into_iter()
-        .map(|(.., r)| r)
-        .chain(pinned)
-        .map(Line::Session)
-        .collect();
+    let mut lines: Vec<Line<'a>> = pinned.into_iter().map(Line::Session).collect();
     match prefs.grouping {
         Grouping::Project => lines.extend(by_project(groups, &buried, &held, cx, &query)),
         Grouping::State => lines.extend(by_state(groups, &buried_under)),

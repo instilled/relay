@@ -519,11 +519,13 @@ impl App {
         self.commands.get_or_init(Commands::from_env)
     }
 
-    /// Where a line typed now starts: the folder of the session under the
-    /// cursor, else of its project, else where `rl` was started.
+    /// Where a line typed now starts: the project root of the row under the
+    /// cursor (the project it is listed under — not its own folder, which
+    /// for a session in a worktree is that worktree), or the project the
+    /// cursor is on, else where `rl` was started.
     pub fn line_folder(&self) -> PathBuf {
         let here = match self.selected() {
-            Some(Line::Session(r)) => Some(r.cwd.clone()),
+            Some(Line::Session(r)) => Some(rows::project_of(r, &rows::Names::new(&self.config.list.names))),
             Some(Line::Group(h)) if h.is_project() => Some(h.workspace.clone()),
             _ => None,
         };

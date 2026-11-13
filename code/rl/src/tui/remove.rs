@@ -13,7 +13,7 @@
 //! agent's hooks told of, one of a harness's own it can do nothing with, a
 //! project — is hidden, but a project you added (`/project`) with nothing in
 //! it is taken off the list. One already hidden and shown only because hidden is
-//! on (or because it came through) is brought back. Pure, so what you are
+//! on is brought back. Pure, so what you are
 //! told can be tested on its own.
 
 use crate::config::ListPrefs;
