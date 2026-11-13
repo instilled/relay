@@ -67,7 +67,7 @@ nothing running in it yet; the cursor lands on it, so typing starts something th
 their own, their own detach or quit brings you back). A session Relay holds lives in a small process of its own
 (`rl-session`), so closing the terminal or the laptop costs nothing.
 
-**Start by typing.** The line at the bottom starts things in the folder of the row under the cursor:
+**Start by typing.** The line at the bottom starts things in the project of the row under the cursor (its root, not a session's own worktree):
 
 ![Typing a prompt on the command line: agent · codex](docs/img/command-line.svg)
 

@@ -2430,6 +2430,26 @@ fn beside(f: &Fixture, name: &str) -> PathBuf {
 }
 
 #[tokio::test]
+async fn a_line_typed_on_a_session_in_a_worktree_starts_in_its_project_root() {
+    let f = fixture();
+    let tree = f.repo.join(".claude/worktrees/login");
+    std::fs::create_dir_all(&tree).unwrap();
+    let mut app = list(&f).await;
+    app.set_native(vec![waiting(&tree)]);
+    app.reload();
+    on(&mut app, NATIVE);
+    assert_eq!(
+        app.line_folder(),
+        f.repo,
+        "the project it is listed under, not its worktree"
+    );
+    typed(&mut app, "claude fix the logout");
+    press(&mut app, KeyCode::Enter);
+    app.finish().await;
+    assert_eq!(ran_in(&f.repo), ["--bg", "fix the logout"]);
+}
+
+#[tokio::test]
 async fn slash_project_adds_an_empty_project_the_cursor_on_it_and_a_line_starts_there() {
     let f = fixture();
     let notes = beside(&f, "notes");
