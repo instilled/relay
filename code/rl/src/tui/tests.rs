@@ -616,6 +616,37 @@ async fn shift_down_swaps_two_rows_and_keeps_it() {
     assert_eq!(app.keys(), [head.as_str(), HELD, NATIVE]);
 }
 
+#[tokio::test]
+async fn with_hidden_shown_rows_move_too_and_a_hidden_one_says_so() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let head = format!("g:{}", f.repo.display());
+    on(&mut app, NATIVE);
+    run(&mut app, "/hide");
+    // Hidden off: it's off the list though it needs you, and the header's
+    // toggle counts it.
+    assert_eq!(app.keys(), [head.as_str(), HELD]);
+    assert!(shown(&app).contains("◌ hidden 1"), "{}", shown(&app));
+    ctrl(&mut app, 'o');
+    assert!(app.prefs().show_hidden);
+    assert!(!shown(&app).contains("◌ hidden 1"), "no count while they're shown");
+    assert_eq!(app.keys(), [head.as_str(), HELD, NATIVE]);
+    // The hidden row wears `◌ hidden`; the other does not.
+    let s = shown(&app);
+    let line = |t: &str| s.lines().find(|l| l.contains(t)).unwrap_or_default().to_string();
+    assert!(line("fix the login").contains("◌ hidden"), "{s}");
+    assert!(!line("shop-sh").contains("◌ hidden"), "{s}");
+    // Moving works with hidden ones shown, and the hidden row keeps its place.
+    on(&mut app, HELD);
+    shift(&mut app, KeyCode::Down);
+    assert_eq!(app.keys(), [head.as_str(), NATIVE, HELD], "{}", shown(&app));
+    let order = Config::load(&f.home).unwrap().list.order;
+    assert_eq!(order[0].rows, [NATIVE, HELD]);
+    // And so with hidden ones off again: only the shown row is left.
+    ctrl(&mut app, 'o');
+    assert_eq!(app.keys(), [head.as_str(), HELD]);
+}
+
 /// Whether a choice is being asked in the footer.
 fn asking(app: &App) -> bool {
     matches!(app.mode, super::app::Mode::Ask(_))
