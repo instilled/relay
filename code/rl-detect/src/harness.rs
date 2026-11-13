@@ -239,7 +239,9 @@ pub enum Owner {
     /// harness as such (`NativeRow::elsewhere`; its `id` is its
     /// conversation's). `listed`: its harness has listed its own
     /// sessions since, so one carried on is not running there already.
-    Elsewhere { listed: bool },
+    /// `open`: its harness lists it as open in that terminal now (its
+    /// process alive), so it is that terminal's, not to be carried on.
+    Elsewhere { listed: bool, open: bool },
 }
 
 /// One session on the list, whoever runs it: what an intent is asked of.
@@ -1055,7 +1057,10 @@ mod tests {
         let sh = get("sh");
         let elsewhere = Session {
             harness: "sh".into(),
-            owner: Owner::Elsewhere { listed: true },
+            owner: Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
             id: "x".into(),
             session_id: "x".into(),
             cwd: "/w".into(),
@@ -1204,7 +1209,15 @@ mod tests {
             at,
         );
         assert_eq!(gemini.attach(&held), Attach::Held);
-        let elsewhere = session("gemini", Owner::Elsewhere { listed: false }, RunState::Idle, at);
+        let elsewhere = session(
+            "gemini",
+            Owner::Elsewhere {
+                listed: false,
+                open: false,
+            },
+            RunState::Idle,
+            at,
+        );
         let Attach::CarryOn(s) = gemini.attach(&elsewhere) else {
             panic!("carried on in a session Relay holds");
         };
@@ -1356,7 +1369,10 @@ mod tests {
                 live: true,
                 dir: "/h/sessions/x".into(),
             },
-            Owner::Elsewhere { listed: true },
+            Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
         ] {
             assert_eq!(
                 c.notify(&session("claude", owner, RunState::Idle, &dir), &mail),
@@ -1413,7 +1429,15 @@ mod tests {
         assert_eq!(argv[1..], ["attach", "ab12cd34"]);
         let elsewhere = Session {
             relay_name: Some("the fix".into()),
-            ..session("claude", Owner::Elsewhere { listed: true }, RunState::Idle, &dir)
+            ..session(
+                "claude",
+                Owner::Elsewhere {
+                    listed: true,
+                    open: false,
+                },
+                RunState::Idle,
+                &dir,
+            )
         };
         let Attach::CarryOn(start) = c.attach(&elsewhere) else {
             panic!("carried on in its background");
@@ -1423,7 +1447,10 @@ mod tests {
             (Some("s-1"), Some("the fix"))
         );
         let unlisted = Session {
-            owner: Owner::Elsewhere { listed: false },
+            owner: Owner::Elsewhere {
+                listed: false,
+                open: false,
+            },
             ..elsewhere
         };
         assert_eq!(c.attach(&unlisted), Attach::No, "it may run in its background already");
@@ -1566,7 +1593,15 @@ mod tests {
         assert!(e.to_string().contains("`-m` can't go"), "{e}");
         Harness::remove(c.as_ref(), &own).unwrap();
         assert_eq!(methods(&bin).last().map(String::as_str), Some("thread/delete"));
-        let elsewhere = session("codex", Owner::Elsewhere { listed: true }, RunState::Idle, &dir);
+        let elsewhere = session(
+            "codex",
+            Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
+            RunState::Idle,
+            &dir,
+        );
         assert_eq!(Harness::rename(c.as_ref(), &elsewhere, "x"), Renamed::RelayOnly(None));
         assert_eq!(c.actions(&elsewhere), Actions::NONE);
         let env = |k: &str| (k == "HOME").then(|| OsString::from("/h"));

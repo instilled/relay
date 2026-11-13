@@ -1183,6 +1183,20 @@ async fn a_claude_open_in_another_terminal_goes_by_its_own_name_on_one_row_kept_
         wide(&app)
     );
     assert!(ran_in(&f.repo).is_empty(), "claude was not asked anything");
+    // At rest there, it is still that terminal's: enter carries nothing on.
+    hooked(&f, IN_TERMINAL, Said::Idle);
+    let mut listed = in_terminal(&f.repo);
+    listed.push(waiting(&f.repo));
+    app.set_native(listed);
+    on(&mut app, &key);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.work.is_empty() && app.hand.is_none(), "nothing begun");
+    assert!(
+        wide(&app).contains("os-dispatch-ea runs in another terminal · switch to it there"),
+        "{}",
+        wide(&app)
+    );
+    assert!(ran_in(&f.repo).is_empty(), "claude was not asked anything");
     // ^x twice hides it, by the key it always had.
     ctrl(&mut app, 'x');
     ctrl(&mut app, 'x');

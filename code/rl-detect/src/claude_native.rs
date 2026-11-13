@@ -213,15 +213,18 @@ impl Harness for Claude {
 
     /// Its own: `claude attach <id>`. One open in another terminal, at rest,
     /// once Claude has listed what runs in its background (else it may run
-    /// there already): carried on there, with the name you gave it.
+    /// there already): carried on there, with the name you gave it. One
+    /// Claude lists as open in its terminal still (`open`): nothing — it is
+    /// that terminal's.
     fn attach(&self, s: &Session) -> Attach {
         match s.owner {
             Owner::Relay { .. } => held::attach(&self.profile, s),
             Owner::Own => Attach::Argv(self.attach_argv(&s.id)),
+            Owner::Elsewhere { open: true, .. } => Attach::No,
             Owner::Elsewhere { .. } if self.start.is_empty() || self.resume.is_empty() => {
                 held::attach(&self.profile, s)
             }
-            Owner::Elsewhere { listed } if listed && s.state == RunState::Idle => Attach::CarryOn(Start {
+            Owner::Elsewhere { listed, .. } if listed && s.state == RunState::Idle => Attach::CarryOn(Start {
                 cwd: s.cwd.clone(),
                 name: s.relay_name.clone(),
                 resume: Some(s.session_id.clone()),
@@ -908,7 +911,10 @@ mod tests {
         // What its harness offers for it is what one elsewhere gets.
         let c = claude();
         let s = Session {
-            owner: Owner::Elsewhere { listed: true },
+            owner: Owner::Elsewhere {
+                listed: true,
+                open: true,
+            },
             ..Session::own(r)
         };
         assert_eq!(
@@ -919,8 +925,27 @@ mod tests {
             },
             "no stop, no remove"
         );
+        assert_eq!(
+            c.attach(&s),
+            Attach::No,
+            "idle, but open in its terminal: that terminal's"
+        );
+        let gone = Session {
+            owner: Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
+            ..s.clone()
+        };
+        assert!(
+            matches!(c.attach(&gone), Attach::CarryOn(_)),
+            "its terminal gone, at rest: carried on"
+        );
         let busy = Session {
-            owner: Owner::Elsewhere { listed: true },
+            owner: Owner::Elsewhere {
+                listed: true,
+                open: true,
+            },
             ..Session::own(busy)
         };
         assert_eq!(c.attach(&busy), Attach::No, "in use where it is");

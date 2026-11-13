@@ -589,6 +589,7 @@ fn elsewhere_row(hook: Option<&HookState>, listed: Option<&NativeRow>, answered:
         harness: harness.clone(),
         owner: Owner::Elsewhere {
             listed: answered.contains(harness),
+            open: listed.is_some(),
         },
         id: sid.clone(),
         session_id: sid.clone(),
@@ -1093,7 +1094,13 @@ mod tests {
             "what its hooks know"
         );
         assert_eq!(both.source, Source::Hooked);
-        assert!(matches!(both.session.owner, Owner::Elsewhere { listed: true }));
+        assert!(matches!(
+            both.session.owner,
+            Owner::Elsewhere {
+                listed: true,
+                open: true
+            }
+        ));
         assert_eq!(
             (both.stop.as_ref(), both.removes),
             (None, false),
@@ -1106,10 +1113,17 @@ mod tests {
             ("alone", RunState::Idle, "idle", Some(at(40))),
             "as Claude says"
         );
-        let Attach::CarryOn(start) = &alone.attach else {
-            panic!("at rest: carried on, as one its hooks tell of: {:?}", alone.attach);
+        assert_eq!(
+            alone.attach,
+            Attach::None,
+            "at rest, but open in its terminal: not carried on"
+        );
+        // Its hooks' word alone, its terminal gone: carried on, as ever.
+        let gone = self::rows(&[], &[hook("claude", "t-9", Said::Idle, None)], &listed);
+        let Attach::CarryOn(start) = &gone[0].attach else {
+            panic!("{:?}", gone[0].attach);
         };
-        assert_eq!(start.resume.as_deref(), Some("t-3"));
+        assert_eq!(start.resume.as_deref(), Some("t-9"));
         assert_eq!(native_id(alone), None, "no id of its harness's own");
         assert_eq!(key_of(&listed[2]), "o:claude:t-3");
         assert_eq!(key_of(&listed[3]), "n:claude:ab12cd34");

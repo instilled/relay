@@ -13,7 +13,7 @@ use super::slash;
 use super::theme;
 use crate::config::{Hidden, ListPrefs};
 use crate::rows::{self, Context, Line, Names};
-use crate::sources::{self, Attach, Harness, Session, Source};
+use crate::sources::{self, Attach, Harness, Owner, Session, Source};
 use crate::spawn::{self, Start};
 use crate::store::sessions;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -60,6 +60,8 @@ impl App {
         let names = Names::new(&self.config.list.names);
         let (title, key) = (names.title(r).to_string(), r.key.clone());
         let (harness, source, state) = (r.harness.clone(), r.source, r.state);
+        // Its harness lists it as open in a terminal of its own still.
+        let open = matches!(r.session.owner, Owner::Elsewhere { open: true, .. });
         let to = match &r.attach {
             Attach::Held(name) => {
                 let name = name.clone();
@@ -77,6 +79,9 @@ impl App {
             Attach::CarryOn(start) => {
                 let start = start.clone();
                 return self.carry_on(start, &harness, title, key);
+            }
+            Attach::None if open => {
+                return self.say(format!("{title} runs in another terminal · switch to it there"));
             }
             Attach::None if source == Source::Hooked && state == rl_core::state::RunState::Idle => {
                 return self.say(format!(

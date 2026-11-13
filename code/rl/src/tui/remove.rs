@@ -241,7 +241,10 @@ mod tests {
                 dir: format!("/h/sessions/{name}").into(),
             },
             Source::Native => Owner::Own,
-            Source::Hooked => Owner::Elsewhere { listed: true },
+            Source::Hooked => Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
         };
         Row {
             key: key.into(),
