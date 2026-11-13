@@ -764,20 +764,18 @@ impl App {
     /// project, which keeps that order from then on — or, on a header, the
     /// project among the projects. The cursor stays on it.
     pub(super) fn reorder(&mut self, up: bool) {
-        if self.config.list.show_hidden {
-            return self.say("with hidden on the list keeps its order · ctrl+o, then move it");
-        }
         let Some(key) = self.sel.clone() else {
             return self.say("nothing here to move");
         };
         let order = {
             let shown = self.lines();
-            // Every row, nothing narrowing it, so what a toggle or the search
-            // leaves out keeps its place.
+            // Every row, nothing narrowing it — hidden ones too — so what a
+            // toggle, the search or a hide leaves out keeps its place, and
+            // a row moves the same whether hidden ones are shown or not.
             let all = ListPrefs {
                 show_agents: true,
                 show_shells: true,
-                show_hidden: false,
+                show_hidden: true,
                 ..self.config.list.clone()
             };
             let full = rows::build(
