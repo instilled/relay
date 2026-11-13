@@ -6,7 +6,8 @@ daemon: `rl`, `rl-session` holders and plain files. What is done is in git.
 
 ## Now
 
-* Nothing in flight.
+* `shift+↑↓` reorders with hidden rows shown too (`ctrl+o`), keeping their places
+  (worktree-reorder-with-hidden).
 
 Last landed (2026-11-12): `ctrl+j` adds a line (#221); `ctrl+x` asks stop / remove the same for
 every harness, Codex removing by `thread/delete` (#222); empty Codex threads not listed (#223); a
@@ -18,6 +19,19 @@ hooks; ctrl+x hides it and enter says to switch to it there (#228).
 
 ## Next
 
+Toward announcing (2026-11-13): it is ready for a quiet beta with people who run more than one
+harness once CI is green and it installs without Rust; a public announcement waits for peek and
+reply and a short demo.
+
+* CI green again: the runs for #227 and #228 never started (GitHub billing); re-run them on main.
+* Peek and reply from the list without attaching (as `claude agents`' space): the core loop of
+  watching a pile of agents, today a full attach and `ctrl+\` each time.
+* An install without Rust: release binaries for macOS and Linux (`rl`, `rl-session`) built on a
+  tag, a one-line install in the README; the repo public.
+* Verify live before strangers hit it: Relay starting the Codex daemon, `/stop` on a Codex turn
+  (`turn/interrupt`), `thread/delete`, the Gemini MCP entry.
+* A 60-second demo: a Claude and a Codex on the list, one asks the other to review, the reply
+  comes back.
 * The list ignored SIGTERM once (2026-11-13, a #226 build, no child): find which state doesn't
   listen for the stop, and make every state leave cleanly on it.
 * Verify live that Claude's hooks fire on a session woken with `--resume --bg`.
@@ -29,13 +43,11 @@ hooks; ctrl+x hides it and enter says to switch to it there (#228).
   so its rows can't say "needs input".
 * Antigravity in its own background (`agy remote-control`, untested for local sessions).
 * `rl mcp` inside Codex knowing its caller (Codex runs MCP servers without the session's env).
-* Peek and reply from the list without attaching (as `claude agents`' space).
 * Socket paths that can't overflow macOS's ~104 bytes.
 * Lister timeouts that leave no threads lingering.
 * `rl setup --harness X` through the wizard, not only plain output.
 * Compatibility CI: recorded fixtures of the real CLIs, and a nightly run against them.
-* Verify live what's left: an `agy` session calling `who`, `/stop` on a Codex turn open elsewhere,
-  Relay starting the Codex daemon, `claude rm`.
+* Verify live what's left: an `agy` session calling `who`, `claude rm`.
 
 ## Dropped
 
