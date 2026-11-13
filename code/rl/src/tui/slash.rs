@@ -424,9 +424,17 @@ impl App {
         if !matches!(self.selected(), Some(Line::Session(_))) {
             return self.say("/rm removes the session under the cursor");
         }
+        let why = match self.selected() {
+            Some(Line::Session(r)) => remove::only_hidden(&r.session),
+            _ => None,
+        };
         match self.removal() {
             Ok(Removal::Ask(a)) => self.ask(a.remove_only()),
             Ok(Removal::Stop { title, .. }) => self.say(format!("{title} can only be stopped from here · /stop")),
+            Ok(Removal::Hide { title, .. } | Removal::Unhide { title, .. }) if why.is_some() => self.say(format!(
+                "/rm can't remove {title} · {} (/hide hides it)",
+                why.unwrap_or_default()
+            )),
             Ok(
                 Removal::Hide { title, .. }
                 | Removal::Unhide { title, .. }

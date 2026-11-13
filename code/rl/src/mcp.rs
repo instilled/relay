@@ -225,10 +225,7 @@ impl Server {
             ids.insert(format!("r:{}", h.meta.name), (h.meta.name.clone(), held_ids(h)));
         }
         for n in &native {
-            ids.insert(
-                format!("n:{}:{}", n.harness, n.id),
-                (n.session_id.clone(), vec![n.session_id.clone()]),
-            );
+            ids.insert(sources::key_of(n), (n.session_id.clone(), vec![n.session_id.clone()]));
         }
         let titles = Config::load(&self.home).map(|c| c.list.names).unwrap_or_default();
         let rows = sources::rows(&held, &hooked, &native, &answered);
@@ -738,6 +735,7 @@ mod tests {
         NativeRow {
             harness: harness.into(),
             id: id.into(),
+            elsewhere: false,
             session_id: session_id.into(),
             name: name.into(),
             cwd: "/w".into(),

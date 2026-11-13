@@ -203,6 +203,7 @@ impl StandIn {
             .map(|cwd| NativeRow {
                 harness: self.inner.info().name.clone(),
                 id: "0a1b2c3d".into(),
+                elsewhere: false,
                 session_id: "s-0a1b2c3d".into(),
                 name: "started".into(),
                 cwd: cwd.clone(),
@@ -398,35 +399,57 @@ pub struct Row {
     pub repo: Option<PathBuf>,
 }
 
-/// Every row, held first, then hooked, then native. A session never stands
-/// twice: a hooked one that a native row or a Relay-held session already
-/// is, nor a native one Relay holds (a harness's own session a held one's
-/// hooks have said is its conversation). `answered`: the harnesses that
-/// have listed their sessions at least once — until then, a hooked row of one
-/// may be among them, and is not carried on. Each folder's repository is
-/// looked for once.
+/// Every row, held first, then those open in other terminals, then the
+/// harnesses' own. A session never stands twice: a hooked one that a native
+/// row or a Relay-held session already is, nor a native one Relay holds (a
+/// harness's own session a held one's hooks have said is its conversation).
+/// One its harness lists as open elsewhere and its hooks tell of too is one
+/// row, by its conversation (`o:<harness>:<id>`), with what each knows best
+/// (`elsewhere_row`). `answered`: the harnesses that have listed their
+/// sessions at least once — until then, a hooked row of one may be among
+/// them, and is not carried on. Each folder's repository is looked for once.
 pub fn rows(held: &[Held], hooked: &[HookState], native: &[NativeRow], answered: &BTreeSet<String>) -> Vec<Row> {
     let held_ids: HashSet<&str> = held
         .iter()
         .filter_map(|h| h.hook.as_ref().map(|k| k.session_id.as_str()))
         .collect();
-    let native: Vec<&NativeRow> = native
+    let (elsewhere, native): (Vec<&NativeRow>, Vec<&NativeRow>) = native
         .iter()
         .filter(|n| !held_ids.contains(n.session_id.as_str()))
-        .collect();
+        .partition(|n| n.elsewhere);
     let taken: HashSet<&str> = held_ids
         .iter()
         .copied()
         .chain(native.iter().map(|n| n.session_id.as_str()))
         .collect();
+    let listed = |harness: &str, sid: &str| {
+        elsewhere
+            .iter()
+            .copied()
+            .find(|n| n.harness == harness && n.session_id == sid)
+    };
+    let hooked: Vec<&HookState> = hooked
+        .iter()
+        .filter(|h| !taken.contains(h.session_id.as_str()))
+        .collect();
+    let told = |n: &NativeRow| {
+        hooked
+            .iter()
+            .any(|h| h.agent == n.harness && h.session_id == n.session_id)
+    };
     let mut rows: Vec<Row> = held
         .iter()
         .map(held_row)
         .chain(
             hooked
                 .iter()
-                .filter(|h| !taken.contains(h.session_id.as_str()))
-                .map(|h| hooked_row(h, answered)),
+                .map(|h| elsewhere_row(Some(h), listed(&h.agent, &h.session_id), answered)),
+        )
+        .chain(
+            elsewhere
+                .iter()
+                .filter(|n| !taken.contains(n.session_id.as_str()) && !told(n))
+                .map(|n| elsewhere_row(None, Some(n), answered)),
         )
         .chain(native.into_iter().map(native_row))
         .collect();
@@ -537,22 +560,40 @@ fn attach(s: &Session) -> Attach {
 /// background, only once the harness has said what runs there (`answered`,
 /// `Owner::Elsewhere::listed`): carried on while it already runs there, it
 /// would run twice.
-fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
-    let state = match h.state {
-        Said::Idle => RunState::Idle,
-        Said::Busy => RunState::Working,
-        Said::Waiting => RunState::NeedsInput,
+///
+/// What its hooks told of it (`hook`), what its harness lists of it as open
+/// elsewhere (`listed`), or both: one row, keyed by its conversation either
+/// way, so a name, a hide or a pin kept for it stays with it. The name is
+/// its harness's, where it gives one (else `session <id>`); how it stands,
+/// its summary and its times are the hooks', where they told — they say
+/// more (one waiting on you) — else its harness's.
+fn elsewhere_row(hook: Option<&HookState>, listed: Option<&NativeRow>, answered: &BTreeSet<String>) -> Row {
+    let (harness, sid, cwd, state, words) = match (hook, listed) {
+        (Some(h), _) => {
+            let state = match h.state {
+                Said::Idle => RunState::Idle,
+                Said::Busy => RunState::Working,
+                Said::Waiting => RunState::NeedsInput,
+            };
+            let words = state_words(state, Confidence::Exact);
+            (&h.agent, &h.session_id, &h.cwd, state, words)
+        }
+        (None, Some(n)) => (&n.harness, &n.session_id, &n.cwd, n.state.state, n.state.words.clone()),
+        (None, None) => unreachable!("a row of what its hooks told or its harness listed"),
     };
-    let name = format!("session {}", h.session_id.chars().take(8).collect::<String>());
-    let words = state_words(state, Confidence::Exact);
+    let name = listed
+        .map(|n| n.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("session {}", sid.chars().take(8).collect::<String>()));
     let session = Session {
-        harness: h.agent.clone(),
+        harness: harness.clone(),
         owner: Owner::Elsewhere {
-            listed: answered.contains(&h.agent),
+            listed: answered.contains(harness),
+            open: listed.is_some(),
         },
-        id: h.session_id.clone(),
-        session_id: h.session_id.clone(),
-        cwd: h.cwd.clone(),
+        id: sid.clone(),
+        session_id: sid.clone(),
+        cwd: cwd.clone(),
         state,
         words: words.clone(),
         name: name.clone(),
@@ -560,25 +601,38 @@ fn hooked_row(h: &HookState, answered: &BTreeSet<String>) -> Row {
         attached: false,
     };
     Row {
-        key: format!("o:{}:{}", h.agent, h.session_id),
+        key: format!("o:{harness}:{sid}"),
         source: Source::Hooked,
-        harness: h.agent.clone(),
+        harness: harness.clone(),
         name,
-        cwd: h.cwd.clone(),
+        cwd: cwd.clone(),
         state,
         words,
-        summary: h.detail.clone(),
-        started: Some(h.started),
+        summary: hook
+            .and_then(|h| h.detail.clone())
+            .or_else(|| listed.and_then(|n| n.summary.clone())),
+        started: hook.map(|h| h.started).or_else(|| listed.and_then(|n| n.started)),
         ended: None,
-        state_at: Some(h.at),
-        pr: None,
-        color: None,
+        state_at: hook.map(|h| h.at).or_else(|| listed.and_then(|n| n.at)),
+        pr: listed.and_then(|n| n.pr.clone()),
+        color: listed.and_then(|n| n.color.clone()),
         attach: attach(&session),
         stop: None,
         removes: false,
         kind: RunKind::Agent,
         repo: None,
         session,
+    }
+}
+
+/// The key the list keeps a harness's listed session by: `n:<harness>:<id>`
+/// for one of its own, `o:<harness>:<conversation>` for one open elsewhere
+/// (the key its hooks' row has always had).
+pub fn key_of(n: &NativeRow) -> String {
+    if n.elsewhere {
+        format!("o:{}:{}", n.harness, n.session_id)
+    } else {
+        format!("n:{}:{}", n.harness, n.id)
     }
 }
 
@@ -598,7 +652,7 @@ fn native_row(n: &NativeRow) -> Row {
     let session = Session::own(n);
     let can = harness_of(&n.harness).actions(&session);
     Row {
-        key: format!("n:{}:{}", n.harness, n.id),
+        key: key_of(n),
         source: Source::Native,
         harness: n.harness.clone(),
         name: n.name.clone(),
@@ -674,6 +728,7 @@ mod tests {
         NativeRow {
             harness: "claude".into(),
             id: "ab12cd34".into(),
+            elsewhere: false,
             session_id: sid.into(),
             name: "fix the login".into(),
             cwd: "/w/api".into(),
@@ -990,6 +1045,94 @@ mod tests {
         );
         let r = rows.iter().find(|r| r.key == "n:claude:4a088e61").unwrap();
         assert_eq!((r.words.as_str(), r.state), ("needs input", RunState::NeedsInput));
+        let t = rows.iter().find(|r| r.key == hooked[0]).unwrap();
+        assert_eq!(t.name, "in a terminal", "the one in a terminal, by Claude's name");
+    }
+
+    /// One Claude lists as open in a terminal of its own.
+    fn in_terminal(sid: &str, name: &str) -> NativeRow {
+        NativeRow {
+            id: sid.into(),
+            elsewhere: true,
+            name: name.into(),
+            state: NativeState {
+                words: "idle".into(),
+                state: RunState::Idle,
+            },
+            summary: None,
+            started: Some(at(40)),
+            at: None,
+            pr: None,
+            ..native(sid)
+        }
+    }
+
+    #[test]
+    fn one_open_elsewhere_that_its_harness_lists_and_its_hooks_tell_of_is_one_row_by_its_conversation() {
+        let hooked = [
+            hook("claude", "t-1", Said::Waiting, Some("asks which port")),
+            hook("claude", "t-2", Said::Busy, None),
+        ];
+        let listed = [
+            in_terminal("t-1", "os-dispatch-ea"),
+            in_terminal("t-2", ""),
+            in_terminal("t-3", "alone"),
+            native("s-bg"),
+        ];
+        let rows = rows(&[], &hooked, &listed);
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["o:claude:t-1", "o:claude:t-2", "o:claude:t-3", "n:claude:ab12cd34"],
+            "each once, by the key its hooks' row has always had"
+        );
+        let both = &rows[0];
+        assert_eq!(both.name, "os-dispatch-ea", "Claude's name");
+        assert_eq!(
+            (both.state, both.summary.as_deref(), both.started),
+            (RunState::NeedsInput, Some("asks which port"), Some(at(150))),
+            "what its hooks know"
+        );
+        assert_eq!(both.source, Source::Hooked);
+        assert!(matches!(
+            both.session.owner,
+            Owner::Elsewhere {
+                listed: true,
+                open: true
+            }
+        ));
+        assert_eq!(
+            (both.stop.as_ref(), both.removes),
+            (None, false),
+            "not the list's to stop"
+        );
+        assert_eq!(rows[1].name, "session t-2", "no name: as ever");
+        let alone = &rows[2];
+        assert_eq!(
+            (alone.name.as_str(), alone.state, alone.words.as_str(), alone.started),
+            ("alone", RunState::Idle, "idle", Some(at(40))),
+            "as Claude says"
+        );
+        assert_eq!(
+            alone.attach,
+            Attach::None,
+            "at rest, but open in its terminal: not carried on"
+        );
+        // Its hooks' word alone, its terminal gone: carried on, as ever.
+        let gone = self::rows(&[], &[hook("claude", "t-9", Said::Idle, None)], &listed);
+        let Attach::CarryOn(start) = &gone[0].attach else {
+            panic!("{:?}", gone[0].attach);
+        };
+        assert_eq!(start.resume.as_deref(), Some("t-9"));
+        assert_eq!(native_id(alone), None, "no id of its harness's own");
+        assert_eq!(key_of(&listed[2]), "o:claude:t-3");
+        assert_eq!(key_of(&listed[3]), "n:claude:ab12cd34");
+        // One Relay holds is its held row only.
+        let mut h = held("api-claude", RunKind::Agent, Status::Live);
+        h.hook = Some(hook("claude", "t-1", Said::Busy, None));
+        let rows = super::rows(&[h], &[], &listed[..1], &BTreeSet::new());
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["r:api-claude"]);
     }
 
     #[test]

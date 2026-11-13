@@ -73,6 +73,7 @@ fn waiting(cwd: &Path) -> NativeRow {
     NativeRow {
         harness: "claude".into(),
         id: "ab12cd34".into(),
+        elsewhere: false,
         session_id: "s-1".into(),
         name: "fix the login".into(),
         cwd: cwd.to_path_buf(),
@@ -1133,6 +1134,89 @@ async fn an_idle_claude_is_not_carried_on_before_claude_has_listed_its_own() {
     press(&mut app, KeyCode::Enter);
     app.finish().await;
     assert_eq!(ran_in(&f.repo), ["--resume", "c-idle", "--bg"]);
+}
+
+/// A conversation open in another terminal, its hooks' and Claude's.
+const IN_TERMINAL: &str = "73059956-4a78-496a-bdfa-2f5b4ba1b747";
+
+/// What Claude lists of `IN_TERMINAL`, as `claude agents --json --all`
+/// prints it, in `cwd`.
+fn in_terminal(cwd: &Path) -> Vec<NativeRow> {
+    let text = format!(
+        r#"[{{"pid":53845,"cwd":"{}","kind":"interactive","startedAt":1794515122530,"sessionId":"{IN_TERMINAL}","name":"os-dispatch-ea","status":"idle"}}]"#,
+        cwd.display()
+    );
+    rl_detect::claude_native::rows(&text, None).unwrap()
+}
+
+#[tokio::test]
+async fn a_claude_open_in_another_terminal_goes_by_its_own_name_on_one_row_kept_by_its_conversation() {
+    use crate::store::state::Said;
+    let f = fixture();
+    hooked(&f, IN_TERMINAL, Said::Waiting);
+    let mut app = list(&f).await;
+    let key = format!("o:claude:{IN_TERMINAL}");
+    on(&mut app, &key);
+    assert!(shown(&app).contains("session 73059956"), "its hooks alone: no name");
+    let mut listed = in_terminal(&f.repo);
+    listed.push(waiting(&f.repo));
+    app.set_native(listed);
+    let keys = app.keys();
+    assert_eq!(
+        keys.iter().filter(|k| k.contains(IN_TERMINAL)).count(),
+        1,
+        "one row: {keys:?}"
+    );
+    on(&mut app, &key);
+    let s = wide(&app);
+    assert_eq!(s.matches("os-dispatch-ea").count(), 1, "{s}");
+    assert!(!s.contains("session 73059956"), "{s}");
+    assert!(
+        row_of(&s, "os-dispatch-ea").contains("needs you"),
+        "its hooks know it waits on you: {s}"
+    );
+    assert!(s.contains("ctrl+x twice to hide · it runs in another terminal"), "{s}");
+    run(&mut app, "/rm");
+    assert!(
+        wide(&app).contains("/rm can't remove os-dispatch-ea · it runs in another terminal (/hide hides it)"),
+        "{}",
+        wide(&app)
+    );
+    assert!(ran_in(&f.repo).is_empty(), "claude was not asked anything");
+    // At rest there, it is still that terminal's: enter carries nothing on.
+    hooked(&f, IN_TERMINAL, Said::Idle);
+    let mut listed = in_terminal(&f.repo);
+    listed.push(waiting(&f.repo));
+    app.set_native(listed);
+    on(&mut app, &key);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.work.is_empty() && app.hand.is_none(), "nothing begun");
+    assert!(
+        wide(&app).contains("os-dispatch-ea runs in another terminal · switch to it there"),
+        "{}",
+        wide(&app)
+    );
+    assert!(ran_in(&f.repo).is_empty(), "claude was not asked anything");
+    // ^x twice hides it, by the key it always had.
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    let hidden = Config::load(&f.home).unwrap().list.hidden;
+    assert_eq!(
+        hidden.iter().map(|h| h.key.as_str()).collect::<Vec<_>>(),
+        [key.as_str()]
+    );
+    assert!(app.keys().iter().all(|k| *k != key));
+    // Claude alone lists it (its hooks' word gone): still that one row, hidden.
+    std::fs::remove_file(crate::store::state::path(&f.home, "claude", IN_TERMINAL).unwrap()).unwrap();
+    let mut listed = in_terminal(&f.repo);
+    listed.push(waiting(&f.repo));
+    app.set_native(listed);
+    assert!(app.keys().iter().all(|k| *k != key), "a hide kept before still applies");
+    ctrl(&mut app, 'o');
+    on(&mut app, &key);
+    let s = wide(&app);
+    assert!(row_of(&s, "os-dispatch-ea").contains("idle"), "as Claude says: {s}");
+    assert!(s.contains("ctrl+x twice to bring back"), "{s}");
 }
 
 #[tokio::test]
