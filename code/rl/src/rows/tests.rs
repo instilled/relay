@@ -329,24 +329,19 @@ fn what_you_hid_shows_inline_when_hidden_is_on() {
 }
 
 #[test]
-fn what_you_hid_comes_through_when_it_comes_to_need_you() {
+fn what_you_hid_stays_off_the_list_even_when_it_needs_you() {
     let stood = |mut r: Row, at: &str| {
         r.state_at = Some(t(at));
         r
     };
     let rows = [
-        // Hidden while it worked, and failed after: it comes through.
+        // Hidden while it worked, and failed after: still off the list.
         stood(
             row("failed", RunState::Failed, RELAY, "2026-09-10T09:00:00Z"),
             "2026-09-10T11:00:00Z",
         ),
-        // Hidden once it had failed: that was you saying so; it stays away.
-        stood(
-            row("seen", RunState::Failed, RELAY, "2026-09-10T09:10:00Z"),
-            "2026-09-10T11:00:00Z",
-        ),
-        // In a hidden project: one that asks after comes through, one still
-        // working does not.
+        row("seen", RunState::Failed, RELAY, "2026-09-10T09:10:00Z"),
+        // In a hidden project: one that asks, one still working.
         stood(
             row("asks", RunState::NeedsInput, API, "2026-09-10T09:20:00Z"),
             "2026-09-10T10:30:00Z",
@@ -359,38 +354,33 @@ fn what_you_hid_comes_through_when_it_comes_to_need_you() {
         hid("r:seen", "2026-09-10T11:30:00Z"),
         hid(&format!("g:{API}"), "2026-09-10T10:00:00Z"),
     ];
+    // Hidden off: the list is what the toggle says. A visible project
+    // hints at what of it is hidden and needs you; a hidden one is off.
     let all = build_with(&rows, &p, "");
-    // Above the projects, what asks before what failed; its project stays
-    // hidden. What stays hidden and needs you is hinted on its project.
-    assert_eq!(keys(&all), ["r:asks", "r:failed", "[relay]"]);
-    assert_eq!(head_of(&all, "relay").attention, 1);
-    assert_eq!(counts(&all).0, 2, "the headline counts them as needing you");
-    // A toggle still narrows it, as it would any row that needs you.
-    let off = toggled(&rows, &p, (false, true, false));
-    assert_eq!(keys(&off), ["[relay]"]);
-    assert_eq!(
-        head_of(&off, "relay").attention,
-        2,
-        "what would come through is still hinted on its project"
-    );
-    // With hidden on they are in their places, not above them.
+    assert_eq!(keys(&all), ["[relay]"]);
+    assert_eq!(head_of(&all, "relay").attention, 2);
+    // With hidden on they are in their places.
     assert_eq!(
         keys(&toggled(&rows, &p, (true, true, true))),
         ["[api]", "r:asks", "r:busy", "[relay]", "r:failed", "r:seen"]
     );
-    // Hiding it again is how it goes back: the time moves on.
-    let mut again = p.clone();
-    again.hidden[0].at = t("2026-09-10T11:45:00Z");
-    let lines = build_with(&rows, &again, "");
-    assert_eq!(keys(&lines), ["r:asks", "[relay]"]);
-    assert_eq!(head_of(&lines, "relay").attention, 2);
+    // How many hidden rows need you, for the header's toggle.
+    assert_eq!(hidden_wanting(&rows, &p), 3);
+    assert_eq!(
+        hidden_wanting(
+            &rows,
+            &ListPrefs {
+                hidden: vec![],
+                ..p.clone()
+            }
+        ),
+        0
+    );
 
     let api = Path::new(API);
     assert_eq!(hidden_since(&rows[2], api, &p.hidden), Some(t("2026-09-10T10:00:00Z")));
     assert_eq!(hidden_with(api, &p.hidden), Some("its project"));
     assert_eq!(hidden_with(Path::new(RELAY), &p.hidden), None);
-    assert!(comes_through(&rows[2], t("2026-09-10T10:00:00Z")));
-    assert!(!comes_through(&rows[2], t("2026-09-10T10:30:00Z")), "not after, at");
 }
 
 #[test]
@@ -492,19 +482,18 @@ fn a_session_with_no_start_stands_after_those_with_one() {
 }
 
 #[test]
-fn a_hidden_session_comes_through_when_it_comes_to_need_you() {
+fn a_hidden_session_that_comes_to_need_you_stays_hidden_and_is_counted() {
     let rows = [
-        // Blocked after its project was hidden: comes through.
+        // Blocked after its project was hidden: still hidden, but counted.
         native("after", RunState::Blocked, RELAY, "2026-09-10T11:30:00Z"),
-        // Blocked before: stays hidden.
         native("before", RunState::Blocked, RELAY, "2026-09-10T10:30:00Z"),
         // At work after: nothing needs you.
         hooked("busy", RunState::Working, RELAY, "2026-09-10T11:30:00Z"),
     ];
     let mut p = prefs(&[]);
     p.hidden = vec![hid(&format!("g:{RELAY}"), "2026-09-10T11:00:00Z")];
-    assert_eq!(keys(&build_with(&rows, &p, "")), ["n:claude:after"]);
-    // Its own hide, later than it came to need you: hidden again.
+    assert!(keys(&build_with(&rows, &p, "")).is_empty());
+    assert_eq!(hidden_wanting(&rows, &p), 2);
     p.hidden.push(hid("n:claude:after", "2026-09-10T11:45:00Z"));
     assert!(keys(&build_with(&rows, &p, "")).is_empty());
     assert_eq!(

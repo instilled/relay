@@ -105,7 +105,7 @@ own keys are ctrl keys, the arrows and `enter`.
 | `ctrl+t` | pin |
 | `ctrl+g` | your colour for the row (a colour the harness set wins on screen) |
 | `ctrl+x ctrl+x` | on a session: `s` stop (while it runs) or `r` remove for good; on anything else, hide (or bring back) |
-| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden (a hidden row or project then says `◌ hidden`) |
+| `ctrl+a` `ctrl+l` `ctrl+o` | show agents, shells, hidden. Hidden rows stay off the list until `ctrl+o`, even when one needs you: the header counts those (`◌ hidden 2`), and shown, a hidden row or project says `◌ hidden` |
 | `ctrl+s` | group by project or by state |
 | `ctrl+h` `f1` | the keys |
 | `ctrl+c ctrl+c` | quit |

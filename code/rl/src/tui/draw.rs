@@ -477,6 +477,12 @@ impl App {
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
             Span::styled(k("◌", "hidden"), lit(p.show_hidden)),
+            // Off, what of it needs you is counted here, in amber: hidden rows
+            // stay off the list, but not out of mind.
+            match rows::hidden_wanting(&self.rows, p) {
+                n if n > 0 && !p.show_hidden => Span::styled(format!(" {n}"), theme::needs()),
+                _ => Span::raw(""),
+            },
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
         ]
@@ -767,18 +773,17 @@ impl App {
         drawn
     }
 
-    /// A session's row. One standing outside its project — pinned, come
-    /// through, or grouped by state — says which project it is from; one
-    /// that came through says it is hidden. A shell at rest says where it is
+    /// A session's row. One standing outside its project — pinned, or
+    /// grouped by state — says which project it is from; a hidden one, shown
+    /// with hidden ones on, says `◌ hidden`. A shell at rest says where it is
     /// in its project, where it says nothing else.
     fn session_line(&self, r: &Row, names: &Names, w: usize, tw: usize, now: Timestamp) -> Line<'static> {
         let p = self.prefs();
         let project = rows::project_of(r, names);
-        // A hidden row says so wherever it shows: among the rest while hidden
-        // ones are shown (`◌`, as the header's toggle), or come through.
+        // A hidden row, shown with hidden ones on, says so (`◌`, as the
+        // header's toggle).
         let hidden = rows::hidden_since(r, &project, &p.hidden).is_some();
-        let through = !p.show_hidden && hidden;
-        let away = through || p.pins.contains(&r.key) || p.grouping == Grouping::State;
+        let away = p.pins.contains(&r.key) || p.grouping == Grouping::State;
         let title = if away {
             format!("{} › {}", names.workspace(&project), names.title(r))
         } else {

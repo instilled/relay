@@ -623,8 +623,13 @@ async fn with_hidden_shown_rows_move_too_and_a_hidden_one_says_so() {
     let head = format!("g:{}", f.repo.display());
     on(&mut app, NATIVE);
     run(&mut app, "/hide");
+    // Hidden off: it's off the list though it needs you, and the header's
+    // toggle counts it.
+    assert_eq!(app.keys(), [head.as_str(), HELD]);
+    assert!(shown(&app).contains("◌ hidden 1"), "{}", shown(&app));
     ctrl(&mut app, 'o');
     assert!(app.prefs().show_hidden);
+    assert!(!shown(&app).contains("◌ hidden 1"), "no count while they're shown");
     assert_eq!(app.keys(), [head.as_str(), HELD, NATIVE]);
     // The hidden row wears `◌ hidden`; the other does not.
     let s = shown(&app);
