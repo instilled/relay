@@ -6,8 +6,7 @@ daemon: `rl`, `rl-session` holders and plain files. What is done is in git.
 
 ## Now
 
-* `shift+↑↓` reorders with hidden rows shown too (`ctrl+o`), keeping their places
-  (worktree-reorder-with-hidden).
+* Nothing in flight.
 
 Last landed (2026-11-12): `ctrl+j` adds a line (#221); `ctrl+x` asks stop / remove the same for
 every harness, Codex removing by `thread/delete` (#222); empty Codex threads not listed (#223); a
@@ -15,7 +14,10 @@ close always ends a held run (#224); the docs slimmed (#225); `/project <folder>
 intent-level `Harness` interface on stable contracts only — no typing, no screen watch; an idle
 Claude woken by `claude stop` + `--resume --bg`, its row and mail carried to the forked session
 (#227). 2026-11-13: a Claude open in another terminal goes by its own name, one row with its
-hooks; ctrl+x hides it and enter says to switch to it there (#228).
+hooks; ctrl+x hides it and enter says to switch to it there (#228). Hidden rows stay off the
+list even when one needs you, counted on the toggle (`◌ hidden 2`), marked `◌ hidden` when
+shown, and rows move with them shown (#229); a typed line starts in the row's project root, not
+a session's worktree (#230).
 
 ## Next
 
