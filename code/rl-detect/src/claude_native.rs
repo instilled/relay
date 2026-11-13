@@ -1,6 +1,8 @@
 //! Claude's own background sessions, 1:1 as `claude agents` shows them:
-//! `claude agents --json --all` (the done ones too) says which there are,
-//! and each one's `jobs/<id>/state.json` under Claude's config folder
+//! `claude agents --json --all` (the done ones too) says which there are —
+//! and those open in a terminal of their own (`kind: interactive`), listed
+//! as running elsewhere by their conversation's id and the name they have
+//! there — and each background one's `jobs/<id>/state.json` under Claude's config folder
 //! (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) adds what the listing leaves
 //! out — its one-line summary (`detail`), the pull request it opened, the
 //! colour you picked for it (`color`, one of `COLORS`), when
@@ -35,9 +37,11 @@ pub const AGENTS_JSON: &str = "claude.agents_json";
 /// The drift check: `claude --bg` printed no id of what it started.
 pub const BG_ID: &str = "claude.bg_id";
 
-/// The `kind` the listing gives a session in Claude's background; the
-/// others are open in a terminal, and their hooks tell of them.
+/// The `kind` the listing gives a session in Claude's background.
 const BACKGROUND: &str = "background";
+/// The `kind` it gives one open in a terminal of its own: listed by its
+/// conversation's id, its name and its `status`, as running elsewhere.
+const INTERACTIVE: &str = "interactive";
 
 /// Claude Code as a harness: its binary and the arguments its profile gives.
 #[derive(Debug, Clone)]
@@ -139,8 +143,9 @@ impl Claude {
 }
 
 impl Claude {
-    /// Its background sessions, as `claude agents --json --all` lists them,
-    /// each filled in from its job file; for no longer than `wait`.
+    /// Its sessions, as `claude agents --json --all` lists them: each in its
+    /// background filled in from its job file, each open in a terminal
+    /// `elsewhere`; for no longer than `wait`.
     pub fn list_within(&self, wait: Duration) -> Result<Vec<NativeRow>> {
         let text = harness::run(&self.argv(&self.list), None, true, wait)?;
         let jobs = self.jobs_dir();
@@ -483,7 +488,7 @@ fn listed(
         if let Ok(rows) = list(left.min(harness::LIST_WAIT))
             && let Some(r) = ids.iter().find_map(|id| {
                 rows.iter()
-                    .find(|r| !before.contains(id) && r.id == *id && harness::same_dir(&r.cwd, cwd))
+                    .find(|r| !r.elsewhere && !before.contains(id) && r.id == *id && harness::same_dir(&r.cwd, cwd))
             })
         {
             return Some(r.clone());
@@ -521,6 +526,8 @@ pub fn started_ids(printed: &str) -> Vec<String> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Listed {
+    /// Its id in Claude's background; none for one open in a terminal.
+    #[serde(default)]
     pub id: String,
     pub session_id: String,
     #[serde(default)]
@@ -577,18 +584,31 @@ pub struct Child {
     pub kind: String,
 }
 
-/// Claude's background sessions in `claude agents --json`. An entry that
-/// does not read — no id, no `sessionId`, no whole folder — is skipped, not
-/// the whole list; one open in a terminal is not a background session.
+/// Claude's sessions in `claude agents --json`: those in its background,
+/// and those open in a terminal of their own. An entry that does not read —
+/// no `sessionId`, no whole folder, in the background no id, a kind not
+/// known — is skipped, not the whole list.
 pub fn parse(text: &str) -> Result<Vec<Listed>> {
     let all: Vec<serde_json::Value> = serde_json::from_str(text).context("reading `claude agents --json`")?;
     Ok(all
         .into_iter()
         .filter_map(|v| serde_json::from_value::<Listed>(v).ok())
         .filter(|l| {
-            l.kind.as_deref() == Some(BACKGROUND) && !l.id.is_empty() && !l.session_id.is_empty() && l.cwd.is_absolute()
+            let known = match l.kind.as_deref() {
+                Some(BACKGROUND) => !l.id.is_empty(),
+                Some(INTERACTIVE) => true,
+                _ => false,
+            };
+            known && !l.session_id.is_empty() && l.cwd.is_absolute()
         })
         .collect())
+}
+
+impl Listed {
+    /// Open in a terminal of its own, not in Claude's background.
+    pub fn elsewhere(&self) -> bool {
+        self.kind.as_deref() == Some(INTERACTIVE)
+    }
 }
 
 /// What every entry of `claude agents --json` must have for Relay to read
@@ -677,6 +697,9 @@ pub fn rows(text: &str, jobs: Option<&Path>) -> Result<Vec<NativeRow>> {
     Ok(parse(text)?
         .into_iter()
         .map(|l| {
+            if l.elsewhere() {
+                return elsewhere_row(l);
+            }
             let j = jobs.and_then(|d| job(d, &l.id));
             let last = jobs.and_then(|d| last_entry_at(d, &l.id));
             row(l, j, last)
@@ -702,6 +725,46 @@ pub fn state(state: Option<&str>, status: Option<&str>, process: bool) -> Native
     NativeState {
         words: words.to_string(),
         state,
+    }
+}
+
+/// How Claude says one open in a terminal stands, by its `status`: `busy`
+/// working, `idle` at rest; a word not known here kept as said.
+pub fn terminal_state(status: Option<&str>) -> NativeState {
+    let (words, state) = match status.unwrap_or_default() {
+        "busy" => ("working", RunState::Working),
+        "idle" => ("idle", RunState::Idle),
+        other => (other, RunState::Idle),
+    };
+    NativeState {
+        words: words.to_string(),
+        state,
+    }
+}
+
+/// A listed session open in a terminal of its own: by its conversation's
+/// id, with the name it has there (none: empty), how it stands, its
+/// folder, and when its process started. No job file is Claude's of it.
+pub fn elsewhere_row(l: Listed) -> NativeRow {
+    let name = l
+        .name
+        .clone()
+        .filter(|n| !n.trim().is_empty() && !n.starts_with("<<"))
+        .unwrap_or_default();
+    NativeRow {
+        harness: crate::user_hooks::CLAUDE.into(),
+        id: l.session_id.clone(),
+        elsewhere: true,
+        session_id: l.session_id,
+        name,
+        cwd: l.cwd,
+        state: terminal_state(l.status.as_deref()),
+        summary: None,
+        started: l.started_at.and_then(|ms| Timestamp::from_millisecond(ms).ok()),
+        ended: None,
+        at: None,
+        pr: None,
+        color: None,
     }
 }
 
@@ -739,6 +802,7 @@ pub fn row(l: Listed, job: Option<Job>, last: Option<Timestamp>) -> NativeRow {
         harness: crate::user_hooks::CLAUDE.into(),
         session_id: j.resume_session_id.filter(|s| !s.is_empty()).unwrap_or(l.session_id),
         id: l.id,
+        elsewhere: false,
         name,
         cwd: l.cwd,
         state: st,
@@ -773,15 +837,24 @@ mod tests {
     }
 
     #[test]
-    fn the_listing_reads_as_claudes_background_sessions_only() {
+    fn the_listing_reads_as_claudes_sessions_in_its_background_and_in_terminals() {
         let l = parse(&listed()).unwrap();
-        let ids: Vec<&str> = l.iter().map(|l| l.id.as_str()).collect();
+        let ids: Vec<&str> = l.iter().filter(|l| !l.elsewhere()).map(|l| l.id.as_str()).collect();
         assert_eq!(
             ids,
             [
                 "8af077cd", "4a088e61", "51eef448", "5286f002", "f40c833b", "059a4700", "a8b1e728", "a7dafda6"
-            ],
-            "the one open in a terminal is not among them"
+            ]
+        );
+        let terminal: Vec<(&str, Option<&str>)> = l
+            .iter()
+            .filter(|l| l.elsewhere())
+            .map(|l| (l.session_id.as_str(), l.name.as_deref()))
+            .collect();
+        assert_eq!(
+            terminal,
+            [("0f0f0f0f-0000-4000-8000-000000000000", Some("in a terminal"))],
+            "the one open in a terminal, by its conversation and its name"
         );
         let skipped = r#"[
           {"id":"b1","cwd":"/w","kind":"background","sessionId":"s1","state":"working","new":{"x":1}},
@@ -789,11 +862,68 @@ mod tests {
           {"id":"b3","cwd":"w/rel","kind":"background","sessionId":"s3"},
           {"id":"b4","cwd":"/w","kind":"background","sessionId":""},
           {"id":"b5","cwd":"/w","sessionId":"s5"},
+          {"pid":7,"cwd":"/w","kind":"interactive","sessionId":"t6","status":"idle"},
+          {"pid":7,"cwd":"w/rel","kind":"interactive","sessionId":"t7"},
+          {"pid":7,"cwd":"/w","kind":"interactive"},
+          {"cwd":"/w","kind":"teleported","sessionId":"t9"},
           "not even an object"
         ]"#;
-        let ids: Vec<String> = parse(skipped).unwrap().into_iter().map(|l| l.id).collect();
-        assert_eq!(ids, ["b1"], "no id, a relative folder, no session id, no kind: skipped");
+        let ids: Vec<String> = parse(skipped).unwrap().into_iter().map(|l| l.session_id).collect();
+        assert_eq!(
+            ids,
+            ["s1", "t6"],
+            "no id in the background, a relative folder, no session id, no kind or one not known: skipped"
+        );
         assert!(parse("{}").is_err(), "not a list at all");
+    }
+
+    #[test]
+    fn one_open_in_a_terminal_is_a_row_running_elsewhere_by_the_name_claude_gives_it() {
+        let text = r#"[{"pid":53845,"cwd":"/Users/x/os-dispatch","kind":"interactive","startedAt":1794515122530,
+            "sessionId":"73059956-4a78-496a-bdfa-2f5b4ba1b747","name":"os-dispatch-ea","status":"idle"},
+          {"pid":7,"cwd":"/w","kind":"interactive","sessionId":"t2","status":"busy"}]"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let rows = rows(text, Some(tmp.path())).unwrap();
+        let r = &rows[0];
+        assert!(r.elsewhere);
+        assert_eq!(
+            (r.id.as_str(), r.session_id.as_str(), r.name.as_str()),
+            (
+                "73059956-4a78-496a-bdfa-2f5b4ba1b747",
+                "73059956-4a78-496a-bdfa-2f5b4ba1b747",
+                "os-dispatch-ea"
+            ),
+            "by its conversation"
+        );
+        assert_eq!(r.cwd, PathBuf::from("/Users/x/os-dispatch"));
+        assert_eq!((r.state.words.as_str(), r.state.state), ("idle", RunState::Idle));
+        assert_eq!(r.started, Timestamp::from_millisecond(1794515122530).ok());
+        assert_eq!((r.summary.as_ref(), r.pr.as_ref(), r.ended), (None, None, None));
+        let busy = &rows[1];
+        assert_eq!(busy.name, "", "no name: none, the list's fallback");
+        assert_eq!(
+            (busy.state.words.as_str(), busy.state.state),
+            ("working", RunState::Working)
+        );
+        // What its harness offers for it is what one elsewhere gets.
+        let c = claude();
+        let s = Session {
+            owner: Owner::Elsewhere { listed: true },
+            ..Session::own(r)
+        };
+        assert_eq!(
+            c.actions(&s),
+            Actions {
+                rename: RenameHow::AtNextStart,
+                ..Actions::NONE
+            },
+            "no stop, no remove"
+        );
+        let busy = Session {
+            owner: Owner::Elsewhere { listed: true },
+            ..Session::own(busy)
+        };
+        assert_eq!(c.attach(&busy), Attach::No, "in use where it is");
     }
 
     #[test]
@@ -861,6 +991,7 @@ mod tests {
                 ("059a4700", "completed", RunState::Finished),
                 ("a8b1e728", "completed", RunState::Finished),
                 ("a7dafda6", "needs input", RunState::NeedsInput),
+                ("0f0f0f0f-0000-4000-8000-000000000000", "working", RunState::Working),
             ]
         );
         assert_eq!(state(Some("failed"), None, false).state, RunState::Failed);
@@ -976,6 +1107,7 @@ mod tests {
         NativeRow {
             harness: "claude".into(),
             id: id.into(),
+            elsewhere: false,
             session_id: format!("s-{id}"),
             name: id.into(),
             cwd: cwd.into(),
@@ -1203,8 +1335,22 @@ mod tests {
             .unwrap()
             .with_config_dir(fixtures());
         let rows = c.list_within(harness::LIST_WAIT).unwrap();
-        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.len(), 9);
         assert_eq!(rows[0].summary.as_deref(), Some("the summary of 8af077cd"));
+        assert!(rows[..8].iter().all(|r| !r.elsewhere), "its background's");
+        let harness::Listed::Rows(listed) = Harness::sessions(&c, harness::LIST_WAIT) else {
+            panic!("it listed");
+        };
+        let elsewhere: Vec<(&str, &str)> = listed
+            .iter()
+            .filter(|r| r.elsewhere)
+            .map(|r| (r.harness.as_str(), r.name.as_str()))
+            .collect();
+        assert_eq!(
+            elsewhere,
+            [("claude", "in a terminal")],
+            "the one in a terminal, running elsewhere"
+        );
     }
 
     /// Against the real `claude`: `cargo test -p rl-detect -- --ignored`.

@@ -68,8 +68,10 @@ A socket path over the OS limit (about 100 bytes) goes under `$TMPDIR/rl-<uid>-<
   one holds up no other, one that fails keeps its last rows marked stale. Attaching pauses them;
   `ask_now` wakes them. `rl ls` (`cmd::listing`) and `rl mcp` ask each on a thread for at most 5s
   (`sources::list_all`); a slow or failing one is left out and named.
-- **Rows.** `rows/` merges and dedupes them (a native row hides the hooked row of the same session)
-  and groups them under a project: a folder you named, else its git checkout (`git::project`: a
+- **Rows.** `rows/` merges and dedupes them (a native row hides the hooked row of the same session;
+  one a harness lists as open elsewhere, `NativeRow::elsewhere`, and its hooks tell of is one row
+  keyed `o:<harness>:<conversation>` as before, with the harness's name and the hooks' state and
+  summary, and ctrl+x only hides it, saying it runs in another terminal) and groups them under a project: a folder you named, else its git checkout (`git::project`: a
   linked worktree's `.git` followed through `commondir`; a submodule is its own). A folder you named
   or added (`/project`, `list.projects`: canonical, its checkout's project if in one) has a header
   even with no rows (`Head::empty`); by state it has none. State comes from
@@ -172,7 +174,7 @@ installs (`harness::set_holder`, `cmd::Store`). Runs go through the bounded `har
 
 | intent | `claude_native::Claude` | `codex_native::Codex` | `harness::Held` (Gemini, Antigravity, cursor, opencode, shells, `generic`) |
 | --- | --- | --- | --- |
-| `sessions` | `claude agents --json --all` plus each session's job file | `thread/loaded/list`, `thread/read`, plus Relay's unloaded threads (`thread/list`, originator `relay`) as `resting`; empty threads skipped | none |
+| `sessions` | `claude agents --json --all` plus each session's job file; one open in a terminal (`kind: interactive`) as `elsewhere`, by its conversation id, with its name and `status` | `thread/loaded/list`, `thread/read`, plus Relay's unloaded threads (`thread/list`, originator `relay`) as `resting`; empty threads skipped | none |
 | `start` | `claude --bg [-n name] [prompt]`, or `claude --resume <session> --bg [-n name]` to carry one on; the id it printed once listed (`begin`). `words`: held as given | `thread/start {cwd}`, `thread/name/set`, `turn/start`, then lets go; no prompt: `Here(codex)`; carry on: `Here(codex resume <id>)`; a flag in `words` refused | `Held` with the profile's `prompt`, `resume` or the words given |
 | `attach` | own: `claude attach <id>`; elsewhere, idle, once Claude has listed: `CarryOn` in its background with your name | own, or elsewhere idle: `codex resume <id>` | held: Relay's attach; elsewhere idle with a `resume`: `CarryOn`, held |
 | `actions` | stop while not ended; remove; rename `AtNextStart` | stop while a turn runs; remove; rename `Now` — each where the schema still has it | held: stop while live, remove; rename `RelayOnly` |

@@ -305,7 +305,7 @@ impl App {
             // The harness's name now, at once, not at its next listing; and
             // Relay keeps none beside it.
             for n in self.native.rows.iter_mut() {
-                if !name.is_empty() && format!("n:{}:{}", n.harness, n.id) == *key {
+                if !name.is_empty() && sources::key_of(n) == *key {
                     n.name = name.clone();
                 }
             }
@@ -324,7 +324,7 @@ impl App {
             self.change_prefs(|p| forget(p, &key));
             // Gone from its harness too: off the list now, not at its next
             // listing.
-            self.native.rows.retain(|r| format!("n:{}:{}", r.harness, r.id) != key);
+            self.native.rows.retain(|r| sources::key_of(r) != key);
         }
         self.reload();
         if let Some(c) = d.setup {

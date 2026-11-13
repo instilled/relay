@@ -27,6 +27,16 @@ pub const STOP: &str = "s stop · keeps the session";
 /// How the footer offers the remove, for every harness.
 pub const REMOVE: &str = "r remove · deletes the session for good";
 
+/// Why the list only hides a session open in a terminal of its own.
+pub const ELSEWHERE: &str = "it runs in another terminal";
+
+/// Why the list can do nothing with `s` but hide it, as whose it is says:
+/// one open in a terminal of its own is that terminal's to stop. None:
+/// what the list can do with it is its harness's to say.
+pub fn only_hidden(s: &Session) -> Option<&'static str> {
+    matches!(s.owner, Owner::Elsewhere { .. }).then_some(ELSEWHERE)
+}
+
 /// What a second `^x` will do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removal {
@@ -444,6 +454,12 @@ mod tests {
             plan(&Line::Session(&o), &prefs, |_| None).unwrap(),
             Removal::Hide { .. }
         ));
+        assert_eq!(
+            only_hidden(&o.session),
+            Some("it runs in another terminal"),
+            "why, as whose it is says"
+        );
+        assert_eq!(only_hidden(&n.session), None, "its harness's to say");
         let h = head("/w/api");
         assert_eq!(
             plan(&Line::Group(h.clone()), &prefs, |_| None).unwrap().hint(),

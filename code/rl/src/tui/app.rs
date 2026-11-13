@@ -340,7 +340,7 @@ impl App {
             .native
             .rows
             .iter()
-            .map(|n| (format!("n:{}:{}", n.harness, n.id), &n.name))
+            .map(|n| (sources::key_of(n), &n.name))
             .filter(|(k, name)| self.config.list.names.get(k) == Some(*name))
             .map(|(k, _)| k)
             .collect();

@@ -66,14 +66,22 @@ pub struct NativeState {
     pub state: RunState,
 }
 
-/// One of a harness's own background sessions, as it lists it.
+/// One of a harness's own sessions, as it lists it: in its background, or
+/// open in a terminal of its own (`elsewhere`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRow {
     pub harness: String,
-    /// The harness's id for it, what attaching takes.
+    /// The harness's id for it, what attaching takes; for one `elsewhere`,
+    /// its conversation's.
     pub id: String,
+    /// Open in a terminal of its own, not in its harness's background: the
+    /// list's row of it is `Owner::Elsewhere`'s, one with what its hooks
+    /// tell.
+    pub elsewhere: bool,
     /// Its conversation's id, what hooks tell of.
     pub session_id: String,
+    /// What its harness calls it; empty for one `elsewhere` it gives no
+    /// name.
     pub name: String,
     pub cwd: PathBuf,
     pub state: NativeState,
@@ -227,8 +235,9 @@ pub enum Owner {
     /// Its harness's own, in its background or on its daemon (its `id` is
     /// its harness's).
     Own,
-    /// Open in a terminal of its own, told of only by its hooks (its `id`
-    /// is its conversation's). `listed`: its harness has listed its own
+    /// Open in a terminal of its own, told of by its hooks or listed by its
+    /// harness as such (`NativeRow::elsewhere`; its `id` is its
+    /// conversation's). `listed`: its harness has listed its own
     /// sessions since, so one carried on is not running there already.
     Elsewhere { listed: bool },
 }
@@ -1076,6 +1085,7 @@ mod tests {
         let row = NativeRow {
             harness: "claude".into(),
             id: "ab12cd34".into(),
+            elsewhere: false,
             session_id: "s".into(),
             name: "x".into(),
             cwd: "/w".into(),

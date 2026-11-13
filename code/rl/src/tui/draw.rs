@@ -661,11 +661,14 @@ impl App {
     fn x_hint(&self) -> String {
         let hidden = |key: &str| self.prefs().hidden.iter().any(|h| h.key == key);
         match self.selected() {
-            Some(ListLine::Session(r)) => match r.source {
-                Source::Held if r.state.is_terminal() || r.state == RunState::Stale => "to remove".into(),
-                Source::Held => "to stop or remove".into(),
-                Source::Native if hidden(&r.key) => "to bring back".into(),
-                Source::Native => match (r.stop.is_some(), r.removes) {
+            Some(ListLine::Session(r)) => match (r.source, remove::only_hidden(&r.session)) {
+                // Why it is only hidden, as whose it is says.
+                (_, Some(_)) if hidden(&r.key) => "to bring back".into(),
+                (_, Some(why)) => format!("to hide · {why}"),
+                (Source::Held, _) if r.state.is_terminal() || r.state == RunState::Stale => "to remove".into(),
+                (Source::Held, _) => "to stop or remove".into(),
+                (Source::Native, _) if hidden(&r.key) => "to bring back".into(),
+                (Source::Native, _) => match (r.stop.is_some(), r.removes) {
                     (true, true) => "to stop or remove".into(),
                     (false, true) => "to remove".into(),
                     (true, false) => "to stop".into(),
