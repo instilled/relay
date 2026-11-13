@@ -438,6 +438,7 @@ mod tests {
         NativeRow {
             harness: harness.into(),
             id: id.into(),
+            elsewhere: false,
             session_id: session_id.into(),
             name: format!("{harness} fix"),
             cwd: cwd.to_path_buf(),

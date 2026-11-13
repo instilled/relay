@@ -229,6 +229,7 @@ mod tests {
         NativeRow {
             harness: "claude".into(),
             id: id.into(),
+            elsewhere: false,
             session_id: format!("s-{id}"),
             name: id.into(),
             cwd: "/w".into(),

@@ -66,14 +66,22 @@ pub struct NativeState {
     pub state: RunState,
 }
 
-/// One of a harness's own background sessions, as it lists it.
+/// One of a harness's own sessions, as it lists it: in its background, or
+/// open in a terminal of its own (`elsewhere`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRow {
     pub harness: String,
-    /// The harness's id for it, what attaching takes.
+    /// The harness's id for it, what attaching takes; for one `elsewhere`,
+    /// its conversation's.
     pub id: String,
+    /// Open in a terminal of its own, not in its harness's background: the
+    /// list's row of it is `Owner::Elsewhere`'s, one with what its hooks
+    /// tell.
+    pub elsewhere: bool,
     /// Its conversation's id, what hooks tell of.
     pub session_id: String,
+    /// What its harness calls it; empty for one `elsewhere` it gives no
+    /// name.
     pub name: String,
     pub cwd: PathBuf,
     pub state: NativeState,
@@ -227,10 +235,13 @@ pub enum Owner {
     /// Its harness's own, in its background or on its daemon (its `id` is
     /// its harness's).
     Own,
-    /// Open in a terminal of its own, told of only by its hooks (its `id`
-    /// is its conversation's). `listed`: its harness has listed its own
+    /// Open in a terminal of its own, told of by its hooks or listed by its
+    /// harness as such (`NativeRow::elsewhere`; its `id` is its
+    /// conversation's). `listed`: its harness has listed its own
     /// sessions since, so one carried on is not running there already.
-    Elsewhere { listed: bool },
+    /// `open`: its harness lists it as open in that terminal now (its
+    /// process alive), so it is that terminal's, not to be carried on.
+    Elsewhere { listed: bool, open: bool },
 }
 
 /// One session on the list, whoever runs it: what an intent is asked of.
@@ -1046,7 +1057,10 @@ mod tests {
         let sh = get("sh");
         let elsewhere = Session {
             harness: "sh".into(),
-            owner: Owner::Elsewhere { listed: true },
+            owner: Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
             id: "x".into(),
             session_id: "x".into(),
             cwd: "/w".into(),
@@ -1076,6 +1090,7 @@ mod tests {
         let row = NativeRow {
             harness: "claude".into(),
             id: "ab12cd34".into(),
+            elsewhere: false,
             session_id: "s".into(),
             name: "x".into(),
             cwd: "/w".into(),
@@ -1194,7 +1209,15 @@ mod tests {
             at,
         );
         assert_eq!(gemini.attach(&held), Attach::Held);
-        let elsewhere = session("gemini", Owner::Elsewhere { listed: false }, RunState::Idle, at);
+        let elsewhere = session(
+            "gemini",
+            Owner::Elsewhere {
+                listed: false,
+                open: false,
+            },
+            RunState::Idle,
+            at,
+        );
         let Attach::CarryOn(s) = gemini.attach(&elsewhere) else {
             panic!("carried on in a session Relay holds");
         };
@@ -1346,7 +1369,10 @@ mod tests {
                 live: true,
                 dir: "/h/sessions/x".into(),
             },
-            Owner::Elsewhere { listed: true },
+            Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
         ] {
             assert_eq!(
                 c.notify(&session("claude", owner, RunState::Idle, &dir), &mail),
@@ -1403,7 +1429,15 @@ mod tests {
         assert_eq!(argv[1..], ["attach", "ab12cd34"]);
         let elsewhere = Session {
             relay_name: Some("the fix".into()),
-            ..session("claude", Owner::Elsewhere { listed: true }, RunState::Idle, &dir)
+            ..session(
+                "claude",
+                Owner::Elsewhere {
+                    listed: true,
+                    open: false,
+                },
+                RunState::Idle,
+                &dir,
+            )
         };
         let Attach::CarryOn(start) = c.attach(&elsewhere) else {
             panic!("carried on in its background");
@@ -1413,7 +1447,10 @@ mod tests {
             (Some("s-1"), Some("the fix"))
         );
         let unlisted = Session {
-            owner: Owner::Elsewhere { listed: false },
+            owner: Owner::Elsewhere {
+                listed: false,
+                open: false,
+            },
             ..elsewhere
         };
         assert_eq!(c.attach(&unlisted), Attach::No, "it may run in its background already");
@@ -1556,7 +1593,15 @@ mod tests {
         assert!(e.to_string().contains("`-m` can't go"), "{e}");
         Harness::remove(c.as_ref(), &own).unwrap();
         assert_eq!(methods(&bin).last().map(String::as_str), Some("thread/delete"));
-        let elsewhere = session("codex", Owner::Elsewhere { listed: true }, RunState::Idle, &dir);
+        let elsewhere = session(
+            "codex",
+            Owner::Elsewhere {
+                listed: true,
+                open: false,
+            },
+            RunState::Idle,
+            &dir,
+        );
         assert_eq!(Harness::rename(c.as_ref(), &elsewhere, "x"), Renamed::RelayOnly(None));
         assert_eq!(c.actions(&elsewhere), Actions::NONE);
         let env = |k: &str| (k == "HOME").then(|| OsString::from("/h"));
