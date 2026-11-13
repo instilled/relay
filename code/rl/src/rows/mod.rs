@@ -33,7 +33,6 @@
 use crate::config::{Grouping, Hidden, ListPrefs, Order};
 use crate::git::{Checkout, Checkouts};
 use crate::query::{Named, Query, Subject};
-use crate::rank;
 use crate::sources::Row;
 use jiff::Timestamp;
 use rl_core::state::{Confidence, RunKind, RunState};

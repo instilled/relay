@@ -196,7 +196,7 @@ pub const EMPTY_HEAD: &str = "no sessions · type to start one";
 /// state heading's words; then the project's git checkout from the state
 /// column on, and at the right edge, in amber, how many of its rows need you
 /// but are off the list — or, dim, that it has nothing in it.
-pub fn header_line(h: &Head, w: usize, tw: usize) -> Line<'static> {
+pub fn header_line(h: &Head, hidden: bool, w: usize, tw: usize) -> Line<'static> {
     let mut l = if h.is_project() {
         let (parent, last, own) = rows::place_parts(&h.place, h.own.as_deref(), place_w(tw));
         vec![
@@ -215,6 +215,7 @@ pub fn header_line(h: &Head, w: usize, tw: usize) -> Line<'static> {
     let right: Vec<Span<'static>> = match rows::needs_hint(h.attention) {
         Some(hint) => vec![Span::styled(hint, theme::needs())],
         None if h.empty => vec![Span::styled(EMPTY_HEAD, theme::dim())],
+        None if hidden => vec![Span::styled("◌ hidden", theme::dim())],
         None => vec![],
     };
     if let Some(c) = &h.checkout {
@@ -476,6 +477,12 @@ impl App {
             // grouping another again, so a divider sets each apart.
             Span::styled("  │  ", off),
             Span::styled(k("◌", "hidden"), lit(p.show_hidden)),
+            // Off, what of it needs you is counted here, in amber: hidden rows
+            // stay off the list, but not out of mind.
+            match rows::hidden_wanting(&self.rows, p) {
+                n if n > 0 && !p.show_hidden => Span::styled(format!(" {n}"), theme::needs()),
+                _ => Span::raw(""),
+            },
             Span::styled("  │  ", off),
             Span::styled(grouping, theme::accent()),
         ]
@@ -734,7 +741,7 @@ impl App {
         let tw = cx.tw;
         let key = line.key();
         let mut drawn = match line {
-            ListLine::Group(h) => header_line(h, w, tw),
+            ListLine::Group(h) => header_line(h, self.prefs().hidden.iter().any(|x| x.key == h.key), w, tw),
             ListLine::Session(r) => self.session_line(r, &cx.names, w, tw, cx.now),
         };
         // A name being typed stands where the name goes, the caret in it.
@@ -766,15 +773,17 @@ impl App {
         drawn
     }
 
-    /// A session's row. One standing outside its project — pinned, come
-    /// through, or grouped by state — says which project it is from; one
-    /// that came through says it is hidden. A shell at rest says where it is
+    /// A session's row. One standing outside its project — pinned, or
+    /// grouped by state — says which project it is from; a hidden one, shown
+    /// with hidden ones on, says `◌ hidden`. A shell at rest says where it is
     /// in its project, where it says nothing else.
     fn session_line(&self, r: &Row, names: &Names, w: usize, tw: usize, now: Timestamp) -> Line<'static> {
         let p = self.prefs();
         let project = rows::project_of(r, names);
-        let through = !p.show_hidden && rows::hidden_since(r, &project, &p.hidden).is_some();
-        let away = through || p.pins.contains(&r.key) || p.grouping == Grouping::State;
+        // A hidden row, shown with hidden ones on, says so (`◌`, as the
+        // header's toggle).
+        let hidden = rows::hidden_since(r, &project, &p.hidden).is_some();
+        let away = p.pins.contains(&r.key) || p.grouping == Grouping::State;
         let title = if away {
             format!("{} › {}", names.workspace(&project), names.title(r))
         } else {
@@ -825,8 +834,8 @@ impl App {
             name,
             vec![Span::styled(word, theme::state(r.state))],
             summary,
-            if through {
-                vec![Span::raw("hidden  ").dim()]
+            if hidden {
+                vec![Span::raw("◌ hidden  ").dim()]
             } else {
                 vec![]
             },
@@ -999,14 +1008,25 @@ mod tests {
             heading: None,
             checkout: checkout.map(Box::new),
         };
-        let a = header_line(&head("~/Projects/flint-platform", None, Some(co("main", 24))), w, tw);
-        let b = header_line(&head("~/tmp/foodai", Some("food"), Some(co("a-long-branch", 4))), w, tw);
+        let a = header_line(
+            &head("~/Projects/flint-platform", None, Some(co("main", 24))),
+            false,
+            w,
+            tw,
+        );
+        let b = header_line(
+            &head("~/tmp/foodai", Some("food"), Some(co("a-long-branch", 4))),
+            false,
+            w,
+            tw,
+        );
         let c = header_line(
             &head(
                 "~/Downloads/some/very/deep/folder/Finance & Real Estate",
                 None,
                 Some(co("main", 0)),
             ),
+            false,
             w,
             tw,
         );
@@ -1025,7 +1045,7 @@ mod tests {
         // at the edge.
         let mut hinted = head("~/tmp/foodai", None, Some(co("main", 0)));
         hinted.attention = 2;
-        let line = header_line(&hinted, w, tw);
+        let line = header_line(&hinted, false, w, tw);
         assert!(line.to_string().ends_with("! 2 need you"), "{line}");
         assert_eq!(line.width(), w);
         let amber = line.spans.iter().find(|s| s.content == "! 2 need you").unwrap();
@@ -1034,14 +1054,19 @@ mod tests {
         // A project with nothing in it says so, dim, at the edge.
         let mut empty = head("~/tmp/notes", None, None);
         empty.empty = true;
-        let line = header_line(&empty, w, tw);
+        let line = header_line(&empty, false, w, tw);
         assert!(line.to_string().ends_with(EMPTY_HEAD), "{line}");
         assert_eq!(line.width(), w);
         let dim = line.spans.iter().find(|s| s.content == EMPTY_HEAD).unwrap();
         assert_eq!(dim.style, theme::dim());
 
+        // A hidden project, shown with hidden ones, says so, dim, at the edge.
+        let line = header_line(&head("~/tmp/foodai", None, None), true, w, tw);
+        assert!(line.to_string().ends_with("◌ hidden"), "{line}");
+        assert_eq!(line.width(), w);
+
         // A heading, grouped by state, says its words where a folder goes.
-        let heading = header_line(&Head::heading(rows::Heading::NeedsInput, 1), w, tw);
+        let heading = header_line(&Head::heading(rows::Heading::NeedsInput, 1), false, w, tw);
         assert!(heading.to_string().starts_with("Needs input"), "{heading}");
         assert!(heading.to_string().ends_with("! 1 needs you"), "{heading}");
 
