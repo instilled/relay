@@ -40,9 +40,8 @@ It downloads `rl` and `rl-session` for your machine, checks their sha256 and put
 `~/.local/bin`. It warns when that folder isn't on your `PATH`, or when another `rl` comes first.
 `--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version vX.Y.Z` (or `RELAY_VERSION`) a
 given release; pass them as `sh -s -- --bin-dir DIR`. **Update:** run the same line again.
-**Uninstall:** `rl setup --remove`, then the same line with `sh -s -- --uninstall`. Everything Relay
-keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names the release and commit; put it
-in bug reports.
+Everything Relay keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names the release
+and commit; put it in bug reports. To take it out again, see [Uninstall](#uninstall).
 
 The Linux binaries are static (musl), so any distribution runs them. The macOS ones are signed
 ad hoc, not notarized: installed this way macOS doesn't ask. Downloaded from the releases page in a
@@ -63,8 +62,7 @@ rl
 `scripts/install` checks for those, builds once and links `rl` into `~/.local/bin`; it is safe to
 run again, and takes `--bin-dir DIR` too. `RELAY_DEV_PROFILE=release` builds and runs release
 binaries (keep it set where you run `rl`). `rl` runs from your clone and rebuilds itself when the
-source changes, so **update** with `git pull`; **uninstall** with `rl setup --remove`, then
-`scripts/install --uninstall`.
+source changes, so **update** with `git pull`.
 
 **Releasing:** bump `version` in `Cargo.toml`, then push the tag `vX.Y.Z`. The release workflow
 builds the four targets with `scripts/package` and opens a draft release with the tarballs, their
@@ -96,6 +94,27 @@ rl setup --yes      # set everything up (but what you declined), plain lines
 rl setup --check    # change nothing; say what would change, exit 1 if anything
 rl setup --remove   # take the hooks and the server out again (--harness H limits any of these)
 ```
+
+## Uninstall
+
+1. Close what Relay holds: `rl ls` lists it, `rl stop <name>` closes one. Claude's and Codex's own
+   sessions are theirs and go on as before.
+2. Take Relay out of your agents' settings, while `rl` is still there:
+
+   ```sh
+   rl setup --remove
+   ```
+
+   This removes Relay's hooks and its `relay` MCP server. It leaves Claude's
+   `leftArrowOpensAgents: false`; delete that key from `~/.claude.json` if you want `←` back.
+3. Remove `rl` and `rl-session`:
+
+   ```sh
+   curl -fsSL https://github.com/instilled/relay/releases/latest/download/install.sh | sh -s -- --uninstall
+   ```
+
+   From a clone: `scripts/install --uninstall`, then delete the clone.
+4. Remove what Relay kept (sessions' state, mail, your list settings): `rm -rf ~/.relay`.
 
 ## The list
 
@@ -272,5 +291,8 @@ conversation content is kept.
 [messaging.md](docs/messaging.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built),
 [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md). The screenshots are made by `scripts/screenshots`
 (needs tmux and python3), the recording by `scripts/demo-video` (also rsvg-convert and ffmpeg), both
-on a made-up machine `scripts/demo-stage` sets up. Relay is a rebuild of
-[instilled/ax](https://github.com/instilled/ax), kept archived.
+on a made-up machine `scripts/demo-stage` sets up.
+
+## License
+
+[MIT](LICENSE), © 2026 instilled.
