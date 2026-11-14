@@ -4,7 +4,29 @@ Relay is `claude agents` for every harness: one list of your agent sessions (Cla
 Antigravity and the like) and your shells, in the terminal you already use. Enter attaches. Agents
 can message each other. No daemon, no model calls; macOS and Linux.
 
-![The list: agents and shells under their projects, one waiting on you](docs/img/list.svg)
+![Relay: typing starts a Codex thread, enter attaches to the Claude that needs you and ctrl+\ comes back, the shells and hidden toggles, grouped by state](docs/img/demo.gif)
+
+<sub>Typing a prompt starts an agent; `enter` attaches, `ctrl+\` comes back and leaves it running;
+`ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by state.
+([MP4](docs/img/demo.mp4); made up, by `scripts/demo-video`.)</sub>
+
+## Why Relay
+
+- **Your shell at your fingertips.** Agents and shells on one list, in the terminal you already
+  use. Type a prompt to start an agent, `! make test` for a shell, `enter` to get into either. No
+  new terminal, no panes, no multiplexer.
+- **Your harnesses, one way in.** Relay doesn't replace Claude Code, Codex or Gemini: it uses each
+  one's own background sessions, CLI and hooks. What it unifies is the interface: start any of them
+  the same way, see which are running and which need you, attach to any.
+- **Agents talk across harnesses.** A small MCP server (`who`, `send`, `inbox`) lets a Claude ask a
+  Codex to review its diff and get the answer back.
+- **Nothing leaves your machine.** No account, no server, no daemon, no telemetry, and Relay calls
+  no model. It runs your harnesses on your machine and reads what they already keep there; they
+  talk to their models as they always do. Relay's only own calls out go through your `gh`: the
+  `PR #95` badge on a project, and a `/report` issue, posted only on your yes.
+
+For one person running several agents at once, in more than one harness, who wants to see which
+need them and get back into any of them. Not an orchestrator: no flows, schedules or summaries.
 
 ## Install
 
@@ -226,7 +248,8 @@ conversation content is kept.
 
 ## Docs
 
-[PRODUCT.md](docs/PRODUCT.md) (what it is for), [messaging.md](docs/messaging.md),
-[ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built), [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md).
-The screenshots are made by `scripts/screenshots` (needs tmux and python3). Relay is a rebuild of
+[messaging.md](docs/messaging.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built),
+[PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md). The screenshots are made by `scripts/screenshots`
+(needs tmux and python3), the recording by `scripts/demo-video` (also rsvg-convert and ffmpeg), both
+on a made-up machine `scripts/demo-stage` sets up. Relay is a rebuild of
 [instilled/ax](https://github.com/instilled/ax), kept archived.

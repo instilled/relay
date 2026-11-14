@@ -1,0 +1,96 @@
+#!/bin/sh
+# Records the README's demo (docs/img/demo.gif, and demo.mp4 beside it) on
+# the made-up Relay scripts/demo-stage sets up: nothing of yours is shown or
+# touched. The list runs in tmux at 110x30; scripts/record.py captures it as
+# it changes and renders the frames.
+#
+#   scripts/demo-video          build, stage, record, render
+#   KEEP=1 scripts/demo-video   keep the temp dir, frames and all
+#
+# Needs tmux, python3, rsvg-convert and ffmpeg.
+set -e
+
+self=$0
+while [ -L "$self" ]; do
+  t=$(readlink "$self")
+  case $t in
+    /*) self=$t ;;
+    *) self=$(dirname "$self")/$t ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P)
+out="$root/docs/img"
+rsvg=$(command -v rsvg-convert) || { echo "demo-video: needs rsvg-convert (librsvg)" >&2; exit 1; }
+ffmpeg=$(command -v ffmpeg) || { echo "demo-video: needs ffmpeg" >&2; exit 1; }
+
+sock="relay-video-$$"
+# shellcheck source=scripts/demo-stage
+. "$root/scripts/demo-stage"
+
+# The wizard's setup, done the quick way, so the footer has no notice.
+tm -f /dev/null new-session -d -s setup -x 110 -y 30 -c "$work" "rl setup --yes; sleep 100000"
+tm set -g default-terminal tmux-256color
+tm set -as terminal-features ',*:RGB'
+tm set -g status off
+sleep 3
+tm kill-session -t setup
+
+tm new-session -d -s demo -x 110 -y 30 -c "$work" "rl"
+sleep 4
+k() { tm send-keys -t demo "$@"; }
+wait_s() { sleep "$1"; }
+typed() { # typed <text>: a key at a time, as a hand types
+  printf '%s' "$1" | fold -w 1 | while IFS= read -r c; do
+    if [ -z "$c" ]; then k Space; else k -l "$c"; fi
+    sleep 0.06
+  done
+}
+
+# Pin the agent that needs you, then start from the top.
+k C-t; sleep 0.5
+k Home; sleep 1
+
+frames="$tmp/frames"
+"$python" "$root/scripts/record.py" capture --sock "$sock" --target demo --out "$frames" --stop "$tmp/stop" --tmux "$tmux_bin" &
+rec=$!
+wait_s 3
+
+# Typing starts an agent in the row's project.
+k Down; wait_s 0.6
+typed "codex make the checkout tests deterministic"
+wait_s 1.5
+k Enter
+wait_s 3
+
+# Into the one that needs you, and back out: it keeps running.
+k Home; wait_s 1
+k Enter
+wait_s 3.5
+# shellcheck disable=SC1003 # a backslash, not an escape
+k 'C-\'
+wait_s 2
+
+# The toggles: shells off, hidden shown, then as they were.
+k C-l; wait_s 1.5
+k C-o; wait_s 2
+k C-o; wait_s 0.5
+k C-l; wait_s 1
+
+# By state: what needs you first.
+k C-s; wait_s 3
+k C-s; wait_s 2
+
+touch "$tmp/stop"
+wait "$rec"
+
+mkdir -p "$out"
+"$python" "$root/scripts/record.py" render --dir "$frames" --cols 110 --rows 30 \
+  --title "rl" --rsvg "$rsvg" --ffmpeg "$ffmpeg" --gif "$out/demo.gif" --mp4 "$out/demo.mp4"
+echo "wrote docs/img/demo.gif and docs/img/demo.mp4" >&2
+
+PATH=$real_path
+# Nothing of the real machine may be in a frame.
+if grep -l -e "$real_home" -e "$(dirname "$root")" -e "/Users/" "$frames"/*.ansi 2>/dev/null; then
+  echo "demo-video: a real path is in the frames above" >&2
+  exit 1
+fi

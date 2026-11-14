@@ -1,6 +1,6 @@
 # Relay — architecture
 
-[PRODUCT.md](PRODUCT.md) says what Relay is for; this file says how the tree under `code/` is wired.
+The [README](../README.md) says what Relay is for; this file says how the tree under `code/` is wired.
 It names the code to read rather than repeating it. The keys are one table in `rl/src/tui/help.rs`
 (the `ctrl+h` grid, the footer's hints and setup's key card), the `/` commands one in
 `rl/src/tui/slash.rs`.
