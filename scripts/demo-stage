@@ -1,0 +1,167 @@
+# Sourced by scripts/screenshots and scripts/demo-video: builds Relay and
+# stages a made-up machine to show it on. A demo home in a temp dir,
+# stand-in harnesses, made-up projects. Nothing of yours is shown or
+# touched: HOME and RELAY_HOME are temp dirs, PATH is /usr/bin:/bin plus the
+# stand-ins, so no real claude, codex or agy is found or run.
+#
+# Expects $root (the clone) and $sock (a tmux socket name). Leaves $tmp (the
+# demo dir, removed on exit unless KEEP=1), $work (its projects), $rl_bin,
+# $python, $real_path, $real_home, and tm (tmux on $sock).
+# shellcheck shell=sh disable=SC2034,SC2154 # set by and for the script that sources it
+
+tmux_bin=$(command -v tmux) || { echo "demo: needs tmux" >&2; exit 1; }
+python=$(command -v python3) || { echo "demo: needs python3" >&2; exit 1; }
+git_bin=$(command -v git) || { echo "demo: needs git" >&2; exit 1; }
+
+echo "building relay…" >&2
+(cd "$root" && cargo build -q --workspace --bins)
+rl_bin="$root/target/debug/rl"
+
+tmp=$(mktemp -d)
+tmp=$(cd "$tmp" && pwd -P)
+cleanup() {
+  "$tmux_bin" -L "$sock" kill-server 2>/dev/null || true
+  # Stop the holders the demo started, then drop the demo.
+  for s in "$tmp"/home/.relay/sessions/*/; do
+    [ -d "$s" ] || continue
+    RELAY_HOME="$tmp/home/.relay" "$rl_bin" stop "$(basename "$s")" >/dev/null 2>&1 || true
+  done
+  if [ -n "$KEEP" ]; then echo "kept $tmp" >&2; else rm -rf "$tmp"; fi
+}
+trap cleanup EXIT
+
+# --- the demo machine -------------------------------------------------------
+
+# A short, made-up home: the list shows it as ~.
+mkdir -p "$tmp/home" "$tmp/bin"
+real_path=$PATH
+real_home=$HOME
+export HOME="$tmp/home"
+export RELAY_HOME="$tmp/home/.relay"
+export PATH="$tmp/bin:/usr/bin:/bin"
+export SHELL=/bin/sh
+export TERM=xterm-256color
+export COLORTERM=truecolor
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+unset CLAUDE_CONFIG_DIR CODEX_HOME RL_SESSION RL_SESSION_AGENT TMUX
+export GIT_AUTHOR_NAME=demo GIT_AUTHOR_EMAIL=demo@example.com
+export GIT_COMMITTER_NAME=demo GIT_COMMITTER_EMAIL=demo@example.com
+export GIT_CONFIG_GLOBAL=/dev/null
+
+ln -s "$rl_bin" "$tmp/bin/rl"
+ln -s "$root/target/debug/rl-session" "$tmp/bin/rl-session"
+ln -s "$git_bin" "$tmp/bin/git"
+ln -s "$python" "$tmp/bin/python3"
+
+# Codex: the daemon stand-in the tests use (threads kept beside it).
+cp "$root/code/fixtures/stand-in-codex-daemon" "$tmp/bin/codex"
+
+# Claude: a stand-in that lists two background sessions of its own and,
+# held by Relay, prints a plausible screen and tells Relay's hook what it
+# is doing (DEMO_STATE: working, needs or done), as Claude's hooks would.
+cp "$root/code/fixtures/stand-in-claude-mcp" "$tmp/bin/claude-mcp"
+cat >"$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+# `rl setup` registers Relay's MCP server through `claude mcp add`.
+[ "$1" = mcp ] && exec claude-mcp "$@"
+if [ "$1" = agents ]; then
+  now=$(($(date +%s) * 1000))
+  cat <<JSON
+[
+ {"id":"5c1e9a20","cwd":"$DEMO_WORK/web","kind":"background","startedAt":$((now - 2400000)),"sessionId":"5c1e9a20-0000-4000-8000-000000000001","name":"checkout page redesign","status":"busy","state":"working"},
+ {"id":"7d40b3f1","cwd":"$DEMO_WORK/web","kind":"background","startedAt":$((now - 7200000)),"sessionId":"7d40b3f1-0000-4000-8000-000000000002","name":"bump vite to 7","state":"done"}
+]
+JSON
+  exit 0
+fi
+[ "$1" = --settings ] && shift 2
+prompt=$*
+sid=$(printf '%s' "$prompt" | cksum | cut -d' ' -f1)
+sid="demo-$sid"
+hook() {
+  printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s"%s}' "$sid" "$PWD" "$1" "$2" | rl hook claude "$1"
+}
+printf '\033[38;2;217;119;87m✻\033[0m Welcome to Claude Code\n\n'
+printf '\033[2m>\033[0m %s\n\n' "$prompt"
+hook SessionStart ""
+hook UserPromptSubmit ",\"prompt\":\"$prompt\""
+case $DEMO_STATE in
+  needs)
+    printf '⏺ Read src/routes/orders.ts (212 lines)\n'
+    printf '⏺ Update src/routes/orders.ts with a token bucket per API key\n\n'
+    printf ' Bash command\n   npm test -- orders\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n'
+    last() { hook Notification ',"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"'; }
+    ;;
+  done)
+    printf '⏺ Updated 4 files, all tests pass.\n\n'
+    last() { hook Stop ""; }
+    ;;
+  *)
+    printf '⏺ Read src/api/orders.ts\n⏺ Search "cursor" in src/\n'
+    printf '\033[38;2;217;119;87m✶\033[0m Adding cursor pagination…\n'
+    last() { hook PostToolUse ',"tool_name":"Edit"'; }
+    ;;
+esac
+# A hook newer than the holder's own reading of the screen wins; a real
+# agent's hooks keep coming, and so do these.
+while :; do last; sleep 2; done
+EOF
+chmod +x "$tmp/bin/claude"
+
+# The projects: shop-api with a worktree, and web.
+work="$tmp/home/work"
+export DEMO_WORK="$work"
+repo() {
+  mkdir -p "$1"
+  git -C "$1" init -q -b main
+  printf '# %s\n' "$(basename "$1")" >"$1/README.md"
+  git -C "$1" add README.md
+  git -C "$1" commit -q -m "first"
+}
+repo "$work/shop-api"
+repo "$work/web"
+git -C "$work/shop-api" worktree add -q -b orders-pagination "$work/shop-api/.worktrees/orders-pagination"
+
+# The list's badges ask gh; there is none here, and none is wanted. The
+# first start's setup question is not wanted either.
+mkdir -p "$RELAY_HOME"
+# The finished vite bump is hidden (as /hide would), so the hidden toggle
+# has something to bring back.
+printf '{"badges": [], "list": {"hidden": [{"key": "n:claude:7d40b3f1", "at": "%s"}]}}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$RELAY_HOME/config.json"
+
+# npm: a dev server that says it is ready and stays up (a command row, ▸).
+cat >"$tmp/bin/npm" <<'EOF'
+#!/bin/sh
+printf '\n> web@0.0.0 dev\n> vite\n\n  VITE v7.0.4  ready in 412 ms\n\n  ➜  Local:   http://localhost:5173/\n'
+while :; do sleep 60; done
+EOF
+chmod +x "$tmp/bin/npm"
+
+rl_new() { # rl_new <folder> <DEMO_STATE> rl-new-args...
+  dir=$1; state=$2; shift 2
+  (cd "$dir" && DEMO_STATE=$state rl new --name-only "$@")
+}
+
+api_needs=$(rl_new "$work/shop-api" needs --harness claude -- "add rate limiting to /orders")
+pag=$(rl_new "$work/shop-api/.worktrees/orders-pagination" working --harness claude -- "paginate GET /orders")
+web_done=$(rl_new "$work/web" "done" --harness claude -- "fix the cart total rounding")
+(cd "$work/shop-api" && rl new --name-only --harness codex -- "fix the flaky checkout test" >/dev/null)
+(cd "$work/web" && rl new --name-only -- npm run dev >/dev/null)
+# A shell of your own (❯), there to type in.
+(cd "$work/shop-api" && rl new --name-only >/dev/null)
+: "$pag" "$web_done"
+
+# Set up, as a user would, through the wizard (the stand-ins take the MCP
+# registration), so the footer has no setup notice. Its steps are
+# captured below, with the rest.
+
+# Colours of your own, by the CLI.
+rl color "$api_needs" orange >/dev/null
+rl color "$web_done" green >/dev/null
+
+# Let the holders' screens and hooks settle.
+sleep 3
+
+tm() { "$tmux_bin" -L "$sock" "$@"; }
