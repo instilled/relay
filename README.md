@@ -4,12 +4,54 @@ Relay is `claude agents` for every harness: one list of your agent sessions (Cla
 Antigravity and the like) and your shells, in the terminal you already use. Enter attaches. Agents
 can message each other. No daemon, no model calls; macOS and Linux.
 
-![The list: agents and shells under their projects, one waiting on you](docs/img/list.svg)
+![Relay: typing starts a Codex thread, enter attaches to the Claude that needs you and ctrl+\ comes back, the shells and hidden toggles, grouped by state](docs/img/demo.gif)
+
+<sub>Typing a prompt starts an agent; `enter` attaches, `ctrl+\` comes back and leaves it running;
+`ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by state.</sub>
+
+## Why Relay
+
+- **Your shell at your fingertips.** Agents and shells on one list, in the terminal you already
+  use. Type a prompt to start an agent, `! make test` for a shell, `enter` to get into either. No
+  new terminal, no panes, no multiplexer.
+- **Your harnesses, one way in.** Relay doesn't replace Claude Code, Codex or Gemini: it uses each
+  one's own background sessions, CLI and hooks. What it unifies is the interface: start any of them
+  the same way, see which are running and which need you, attach to any.
+- **Agents talk across harnesses.** A small MCP server (`who`, `send`, `inbox`) lets a Claude ask a
+  Codex to review its diff and get the answer back.
+- **Nothing leaves your machine.** No account, no server, no daemon, no telemetry, and Relay calls
+  no model. It runs your harnesses on your machine and reads what they already keep there; they
+  talk to their models as they always do. `gh` is optional: signed in, a project shows its open
+  PR and `/report` can post an issue, only on your yes; without it, neither asks anything.
+
+For one person running several agents at once, in more than one harness, who wants to see which
+need them and get back into any of them. Not an orchestrator: no flows, schedules or summaries.
 
 ## Install
 
-You need Rust (1.96 or newer, from [rustup.rs](https://rustup.rs)), `git` and a C linker (on macOS:
-`xcode-select --install`).
+On macOS (Apple silicon or Intel) or Linux (x86_64 or arm64), no Rust needed:
+
+```sh
+curl -fsSL https://github.com/instilled/relay/releases/latest/download/install.sh | sh
+rl
+```
+
+It downloads `rl` and `rl-session` for your machine, checks their sha256 and puts both in
+`~/.local/bin`. It warns when that folder isn't on your `PATH`, or when another `rl` comes first.
+`--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version vX.Y.Z` (or `RELAY_VERSION`) a
+given release; pass them as `sh -s -- --bin-dir DIR`. **Update:** run the same line again.
+Everything Relay keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names the release
+and commit; put it in bug reports. To take it out again, see [Uninstall](#uninstall).
+
+The Linux binaries are static (musl), so any distribution runs them. The macOS ones are signed
+ad hoc, not notarized: installed this way macOS doesn't ask. Downloaded from the releases page in a
+browser instead, macOS says it can't verify them; `xattr -d com.apple.quarantine rl rl-session`
+lets them run.
+
+### From a clone
+
+To hack on Relay, or on a machine without a release, build it: you need Rust (1.96 or newer, from
+[rustup.rs](https://rustup.rs)), `git` and a C linker (on macOS: `xcode-select --install`).
 
 ```sh
 git clone https://github.com/instilled/relay && cd relay
@@ -18,14 +60,13 @@ rl
 ```
 
 `scripts/install` checks for those, builds once and links `rl` into `~/.local/bin`; it is safe to
-run again. It warns when that folder isn't on your `PATH`, or when another `rl` comes first (an old
-`cargo install`: `cargo uninstall rl`). `--bin-dir DIR` (or `RELAY_BIN_DIR`) links elsewhere;
-`RELAY_DEV_PROFILE=release` builds and runs release binaries (keep it set where you run `rl`).
+run again, and takes `--bin-dir DIR` too. `RELAY_DEV_PROFILE=release` builds and runs release
+binaries (keep it set where you run `rl`). `rl` runs from your clone and rebuilds itself when the
+source changes, so **update** with `git pull`.
 
-This is a dev install: `rl` runs from your clone and rebuilds itself when the source changes, so
-**update** with `git pull`. `rl --version` names the commit; put it in bug reports. **Uninstall:**
-`rl setup --remove`, then `scripts/install --uninstall`. Everything Relay keeps is in `~/.relay`
-(`RELAY_HOME` moves it).
+**Releasing:** bump `version` in `Cargo.toml`, then push the tag `vX.Y.Z`. The release workflow
+builds the four targets with `scripts/package` and opens a draft release with the tarballs, their
+sha256 and `install.sh` (`scripts/install-release`); publish the draft once it looks right.
 
 ## Setup
 
@@ -53,6 +94,27 @@ rl setup --yes      # set everything up (but what you declined), plain lines
 rl setup --check    # change nothing; say what would change, exit 1 if anything
 rl setup --remove   # take the hooks and the server out again (--harness H limits any of these)
 ```
+
+## Uninstall
+
+1. Close what Relay holds: `rl ls` lists it, `rl stop <name>` closes one. Claude's and Codex's own
+   sessions are theirs and go on as before.
+2. Take Relay out of your agents' settings, while `rl` is still there:
+
+   ```sh
+   rl setup --remove
+   ```
+
+   This removes Relay's hooks and its `relay` MCP server. It leaves Claude's
+   `leftArrowOpensAgents: false`; delete that key from `~/.claude.json` if you want `←` back.
+3. Remove `rl` and `rl-session`:
+
+   ```sh
+   curl -fsSL https://github.com/instilled/relay/releases/latest/download/install.sh | sh -s -- --uninstall
+   ```
+
+   From a clone: `scripts/install --uninstall`, then delete the clone.
+4. Remove what Relay kept (sessions' state, mail, your list settings): `rm -rf ~/.relay`.
 
 ## The list
 
@@ -226,7 +288,11 @@ conversation content is kept.
 
 ## Docs
 
-[PRODUCT.md](docs/PRODUCT.md) (what it is for), [messaging.md](docs/messaging.md),
-[ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built), [PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md).
-The screenshots are made by `scripts/screenshots` (needs tmux and python3). Relay is a rebuild of
-[instilled/ax](https://github.com/instilled/ax), kept archived.
+[messaging.md](docs/messaging.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it is built),
+[PRODUCT-ROADMAP.md](docs/PRODUCT-ROADMAP.md). The screenshots are made by `scripts/screenshots`
+(needs tmux and python3), the recording by `scripts/demo-video` (also rsvg-convert and ffmpeg), both
+on a made-up machine `scripts/demo-stage` sets up.
+
+## License
+
+[MIT](LICENSE), © 2026 instilled.

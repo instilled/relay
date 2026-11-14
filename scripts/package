@@ -1,0 +1,75 @@
+#!/bin/sh
+# Packs rl and rl-session into the tarball a release ships and
+# scripts/install-release fetches: relay-<target>.tar.gz and its .sha256.
+#
+#   scripts/package [--target T] [--from DIR] [--out DIR]
+#
+# --target  the Rust target to build (default: this machine's)
+# --from    pack the binaries already in DIR instead of building (the checks
+#           use the debug build)
+# --out     where the tarball goes (default: dist/)
+#
+# On macOS it makes sure the binaries carry a valid signature: an unsigned
+# arm64 binary is killed on start. Apple's linker ad-hoc signs arm64; an
+# x86_64 build gets an ad-hoc signature here. No Developer ID, no
+# notarization: curl sets no quarantine, so Gatekeeper never asks.
+set -e
+
+die() { printf 'scripts/package: %s\n' "$*" >&2; exit 1; }
+usage() { echo "usage: scripts/package [--target T] [--from DIR] [--out DIR]" >&2; exit 2; }
+
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+target=""
+from=""
+out="$root/dist"
+while [ $# -gt 0 ]; do
+  case $1 in
+    --target) [ $# -ge 2 ] || usage; target=$2; shift 2 ;;
+    --from) [ $# -ge 2 ] || usage; from=$2; shift 2 ;;
+    --out) [ $# -ge 2 ] || usage; out=$2; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "scripts/package: unknown argument: $1" >&2; usage ;;
+  esac
+done
+
+if [ -z "$target" ]; then
+  target=$(rustc -vV | sed -n 's/^host: //p')
+  [ -n "$target" ] || die "cannot tell this machine's target (rustc -vV)"
+fi
+
+if [ -z "$from" ]; then
+  (cd "$root" && cargo build --release --locked --target "$target" -p rl -p rl-session) \
+    || die "the build failed (above)"
+  from="$root/target/$target/release"
+fi
+for b in rl rl-session; do
+  [ -x "$from/$b" ] || die "no $from/$b"
+done
+
+if [ "$(uname -s)" = Darwin ]; then
+  for b in rl rl-session; do
+    # The linker signs arm64 only; an x86_64 build gets the same ad-hoc one.
+    codesign -v "$from/$b" 2>/dev/null || codesign -s - -f "$from/$b" \
+      || die "could not sign $from/$b"
+    codesign -v "$from/$b" || die "$from/$b has no valid signature; an arm64 Mac would kill it"
+  done
+fi
+
+mkdir -p "$out"
+out=$(cd "$out" && pwd -P)
+name="relay-$target"
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+mkdir "$stage/$name"
+cp "$from/rl" "$from/rl-session" "$stage/$name/"
+cp "$root/README.md" "$root/LICENSE" "$stage/$name/"
+(cd "$stage" && tar -czf "$out/$name.tar.gz" "$name")
+(
+  cd "$out"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$name.tar.gz" >"$name.tar.gz.sha256"
+  else
+    shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256"
+  fi
+)
+printf '%s\n' "$out/$name.tar.gz"
