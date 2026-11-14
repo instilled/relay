@@ -1,0 +1,184 @@
+#!/bin/sh
+# Install relay from a release: no Rust, no clone. Each release ships this
+# script as install.sh, so the one line is
+#
+#   curl -fsSL https://github.com/instilled/relay/releases/latest/download/install.sh | sh
+#
+# It downloads rl and rl-session for this machine, checks their sha256 and
+# puts both in ~/.local/bin. Run it again to update. Safe to run again.
+#
+#   sh install.sh                     the latest release into ~/.local/bin
+#   sh install.sh --version v0.2.0    that release (or RELAY_VERSION=v0.2.0)
+#   sh install.sh --bin-dir DIR       into DIR instead (or RELAY_BIN_DIR=DIR)
+#   sh install.sh --uninstall         remove rl and rl-session from there
+#
+# RELAY_RELEASE_URL replaces https://github.com/instilled/relay/releases (the
+# checks point it at a local folder).
+set -e
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die() { printf 'relay install: %s\n' "$*" >&2; exit 1; }
+usage() {
+  echo "usage: install.sh [--version vX.Y.Z] [--bin-dir DIR] [--uninstall]" >&2
+  exit 2
+}
+
+base=${RELAY_RELEASE_URL:-https://github.com/instilled/relay/releases}
+version=${RELAY_VERSION:-latest}
+bin_dir=${RELAY_BIN_DIR:-$HOME/.local/bin}
+uninstall=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --version) [ $# -ge 2 ] || usage; version=$2; shift 2 ;;
+    --version=*) version=${1#--version=}; shift ;;
+    --bin-dir) [ $# -ge 2 ] || usage; bin_dir=$2; shift 2 ;;
+    --bin-dir=*) bin_dir=${1#--bin-dir=}; shift ;;
+    --uninstall) uninstall=1; shift ;;
+    -h|--help) usage ;;
+    *) echo "relay install: unknown argument: $1" >&2; usage ;;
+  esac
+done
+[ -n "$bin_dir" ] || die "the bin dir is empty"
+
+# Whether $1 is relay's: a link to a clone's dev shim, or a binary that
+# answers --version as rl does.
+is_relay() {
+  if [ -L "$1" ]; then
+    case $(readlink "$1") in */scripts/rl) return 0 ;; esac
+  fi
+  [ -x "$1" ] || return 1
+  case $("$1" --version 2>/dev/null) in "rl "*) return 0 ;; esac
+  return 1
+}
+
+if [ -n "$uninstall" ]; then
+  if [ ! -e "$bin_dir/rl" ] && [ ! -L "$bin_dir/rl" ]; then
+    say "no $bin_dir/rl to remove"
+  elif is_relay "$bin_dir/rl"; then
+    rm -f "$bin_dir/rl" "$bin_dir/rl-session"
+    say "removed $bin_dir/rl and $bin_dir/rl-session"
+  else
+    say "$bin_dir/rl is not relay's; left alone"
+  fi
+  say ""
+  say "Run rl setup --remove first to take Relay's hooks and MCP server out of your agents'"
+  say "settings (reinstall for it if need be). Your sessions and settings stay in ~/.relay."
+  exit 0
+fi
+
+# --- which build ------------------------------------------------------------
+
+case $(uname -s) in
+  Darwin) os=apple-darwin ;;
+  Linux) os=unknown-linux-musl ;;
+  *) die "no release for $(uname -s); relay runs on macOS and Linux" ;;
+esac
+case $(uname -m) in
+  arm64|aarch64) arch=aarch64 ;;
+  x86_64|amd64) arch=x86_64 ;;
+  *) die "no release for $(uname -m); build from a clone (scripts/install)" ;;
+esac
+target="$arch-$os"
+asset="relay-$target.tar.gz"
+if [ "$version" = latest ]; then
+  url="$base/latest/download"
+else
+  url="$base/download/$version"
+fi
+
+# --- download and check -----------------------------------------------------
+
+fetch() { # url file
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$1" -O "$2"
+  else
+    die "neither curl nor wget is on PATH"
+  fi
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+say "downloading relay ($version, $target)…"
+fetch "$url/$asset" "$tmp/$asset" || die "could not download $url/$asset"
+fetch "$url/$asset.sha256" "$tmp/$asset.sha256" || die "could not download $url/$asset.sha256"
+
+want=$(cut -d' ' -f1 <"$tmp/$asset.sha256")
+if command -v sha256sum >/dev/null 2>&1; then
+  have=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then
+  have=$(shasum -a 256 "$tmp/$asset" | cut -d' ' -f1)
+else
+  die "neither sha256sum nor shasum is on PATH, so the download cannot be checked"
+fi
+[ -n "$want" ] && [ "$want" = "$have" ] || die "$asset does not match its sha256; nothing was installed"
+
+(cd "$tmp" && tar -xzf "$asset") || die "could not unpack $asset"
+src="$tmp/relay-$target"
+for b in rl rl-session; do
+  [ -x "$src/$b" ] || die "$asset has no $b"
+done
+
+# --- install ----------------------------------------------------------------
+
+mkdir -p "$bin_dir" || die "cannot create $bin_dir"
+bin_dir=$(cd "$bin_dir" && pwd -P)
+if [ -e "$bin_dir/rl" ] || [ -L "$bin_dir/rl" ]; then
+  is_relay "$bin_dir/rl" || die "$bin_dir/rl is not relay's, so it is left alone. Move it away or pick another dir: --bin-dir DIR"
+  if [ -L "$bin_dir/rl" ]; then
+    say "replacing $bin_dir/rl (it linked a clone's dev shim: $(readlink "$bin_dir/rl"))"
+  fi
+fi
+# Copy beside, then rename over: an rl or rl-session running now keeps its
+# old file, and a held session keeps the rl-session it started with.
+for b in rl-session rl; do
+  cp "$src/$b" "$bin_dir/.$b.new"
+  chmod 755 "$bin_dir/.$b.new"
+  rm -f "$bin_dir/$b"
+  mv "$bin_dir/.$b.new" "$bin_dir/$b"
+done
+say "installed $("$bin_dir/rl" --version) in $bin_dir"
+
+# --- PATH -------------------------------------------------------------------
+
+on_path=""
+shadow=""
+old_ifs=$IFS
+IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || continue
+  real=$(cd "$d" 2>/dev/null && pwd -P) || continue
+  if [ "$real" = "$bin_dir" ]; then
+    on_path=1
+    break
+  fi
+  if [ -z "$shadow" ] && [ -x "$d/rl" ] && [ ! -d "$d/rl" ]; then
+    shadow="$d/rl"
+  fi
+done
+IFS=$old_ifs
+
+case $(basename "${SHELL:-sh}") in
+  zsh) rc="$HOME/.zshrc" ;;
+  bash) if [ "$(uname -s)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+  *) rc="your shell's startup file" ;;
+esac
+
+if [ -z "$on_path" ]; then
+  warn "$bin_dir is not on your PATH. Add this line to $rc, then open a new shell:"
+  # shellcheck disable=SC2016 # $PATH is meant literally
+  printf '  export PATH="%s:$PATH"\n' "$bin_dir" >&2
+elif [ -n "$shadow" ]; then
+  warn "another rl comes first on your PATH and runs instead: $shadow"
+  case $shadow in
+    */.cargo/bin/rl) say "  it looks like a cargo install; remove it with: cargo uninstall rl" >&2 ;;
+    *) say "  remove it, or put $bin_dir earlier on your PATH (in $rc)" >&2 ;;
+  esac
+fi
+
+say ""
+say "Next: run rl. The first time, it offers to set Relay up for the agents it finds (or run rl setup)."
+say "Update: run this again."
+exit 0
