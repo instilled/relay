@@ -6,15 +6,41 @@ daemon: `rl`, `rl-session` holders and plain files. What is done is in git.
 
 ## Now
 
-* Slim the docs: README, ARCHITECTURE, this roadmap; the old plans and specs go.
+* Nothing in flight.
+
+Last landed (2026-11-12): `ctrl+j` adds a line (#221); `ctrl+x` asks stop / remove the same for
+every harness, Codex removing by `thread/delete` (#222); empty Codex threads not listed (#223); a
+close always ends a held run (#224); the docs slimmed (#225); `/project <folder>` (#226); one
+intent-level `Harness` interface on stable contracts only — no typing, no screen watch; an idle
+Claude woken by `claude stop` + `--resume --bg`, its row and mail carried to the forked session
+(#227). 2026-11-13: a Claude open in another terminal goes by its own name, one row with its
+hooks; ctrl+x hides it and enter says to switch to it there (#228). Hidden rows stay off the
+list even when one needs you, counted on the toggle (`◌ hidden 2`), marked `◌ hidden` when
+shown, and rows move with them shown (#229); a typed line starts in the row's project root, not
+a session's worktree (#230). 2026-11-14: CI runs again (billing), main green; release binaries
+for macOS and Linux built on a tag, `install.sh` installs them without Rust, checked in CI (#231);
+the README opens with a recording (`scripts/demo-video`) and "Why Relay", has Uninstall and the MIT
+license, the screenshots are current, PRODUCT.md is folded in and ARCHITECTURE is a third as long
+(#232).
 
 ## Next
 
-* One intent-level `Harness` interface — info, sessions, start, attach, actions, stop, close,
-  rename, notify, setup, caller, check — each harness binding its own steps. Stable contracts only
-  (documented CLI, JSON, Codex's schema): no screen reading or typing. An idle Claude is woken by
-  `claude stop` + `claude --resume <id> --bg`; the ← screen watch goes.
-* `/project <folder>`.
+Toward announcing (2026-11-14): a quiet beta with people who run more than one harness once the
+first release is out and the repo public; a public announcement waits for peek and reply and the
+messaging demo.
+
+* The first release: push `v0.1.0`, check the draft the release workflow opens, publish it; make
+  the repo public. Then confirm live: the `curl … | sh` line on a clean Mac (no quarantine,
+  `xattr`) and on Linux.
+* Peek and reply from the list without attaching (as `claude agents`' space): the core loop of
+  watching a pile of agents, today a full attach and `ctrl+\` each time.
+* Verify live before strangers hit it: Relay starting the Codex daemon, `/stop` on a Codex turn
+  (`turn/interrupt`), `thread/delete`, the Gemini MCP entry.
+* The messaging demo, recorded live (stand-ins would fake it): a Claude and a Codex on the list,
+  one asks the other to review, the reply comes back. The README's recording covers the list.
+* The list ignored SIGTERM once (2026-11-13, a #226 build, no child): find which state doesn't
+  listen for the stop, and make every state leave cleanly on it.
+* Verify live that Claude's hooks fire on a session woken with `--resume --bg`.
 
 ## Later
 
@@ -23,13 +49,15 @@ daemon: `rl`, `rl-session` holders and plain files. What is done is in git.
   so its rows can't say "needs input".
 * Antigravity in its own background (`agy remote-control`, untested for local sessions).
 * `rl mcp` inside Codex knowing its caller (Codex runs MCP servers without the session's env).
-* Peek and reply from the list without attaching (as `claude agents`' space).
 * Socket paths that can't overflow macOS's ~104 bytes.
 * Lister timeouts that leave no threads lingering.
 * `rl setup --harness X` through the wizard, not only plain output.
 * Compatibility CI: recorded fixtures of the real CLIs, and a nightly run against them.
-* Verify live what's left: an `agy` session calling `who`, `/stop` on a Codex turn open elsewhere,
-  Relay starting the Codex daemon, `claude rm`.
+* A Homebrew tap (a formula, not a cask, so no quarantine).
+* Notarized macOS binaries, by the public announcement or the first user hitting the dialog:
+  the Apple Developer Program (~$99/yr) for a Developer ID; the release workflow runs `codesign`
+  and `xcrun notarytool submit --wait`, the cert and an app-specific password as GitHub secrets.
+* Verify live what's left: an `agy` session calling `who`, `claude rm`.
 
 ## Dropped
 
