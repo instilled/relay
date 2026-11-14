@@ -1,0 +1,105 @@
+#!/bin/sh
+# Checks scripts/install-release end to end against a release folder made
+# here: the debug build packed by scripts/package, served from disk through
+# RELAY_RELEASE_URL. Temp HOME and RELAY_HOME, so it never touches your own
+# ~/.local/bin or ~/.relay. CI runs it on Linux and macOS after the build.
+#
+#   scripts/check-install-release
+set -e
+
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+install="$root/scripts/install-release"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+tmp=$(cd "$tmp" && pwd -P)
+
+fail() { printf 'check-install-release: FAIL: %s\n' "$*" >&2; exit 1; }
+step() { printf '\n== %s\n' "$*"; }
+has() { grep -q -- "$2" "$1" || { cat "$1" >&2; fail "expected '$2'"; }; }
+
+step "pack the debug build as a release"
+(cd "$root" && cargo build -q --workspace --bins) || fail "build"
+case $(uname -s) in Darwin) os=apple-darwin ;; *) os=unknown-linux-musl ;; esac
+case $(uname -m) in arm64|aarch64) arch=aarch64 ;; *) arch=x86_64 ;; esac
+target="$arch-$os"
+rel="$tmp/releases/download/v0.0.0-check"
+"$root/scripts/package" --target "$target" --from "$root/target/debug" --out "$rel" >/dev/null \
+  || fail "package"
+ls "$rel"
+
+CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
+RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
+export CARGO_HOME RUSTUP_HOME
+export HOME="$tmp/home"
+export RELAY_HOME="$tmp/home/.relay"
+export RELAY_RELEASE_URL="file://$tmp/releases"
+export RELAY_VERSION=v0.0.0-check
+mkdir -p "$HOME"
+unset RELAY_BIN_DIR
+bin="$tmp/bin"
+
+step "install into a dir not on PATH"
+sh "$install" --bin-dir "$bin" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "install failed"; }
+cat "$tmp/out"
+[ -f "$bin/rl" ] && [ ! -L "$bin/rl" ] || fail "no file at $bin/rl"
+[ -x "$bin/rl-session" ] || fail "no $bin/rl-session"
+has "$tmp/out" "installed rl "
+has "$tmp/out" "is not on your PATH"
+has "$tmp/out" "Next: run rl"
+
+step "rl --version"
+v=$("$bin/rl" --version)
+echo "$v"
+echo "$v" | grep -Eq '^rl [0-9]+\.[0-9]+\.[0-9]+ \(([0-9a-f]{4,}|unknown)\)$' || fail "version: $v"
+
+step "rl setup --check, with no harness and no cargo on PATH"
+PATH="$bin:/usr/bin:/bin" "$bin/rl" setup --check >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "setup --check"; }
+cat "$tmp/out"
+has "$tmp/out" "all set up"
+
+step "install again (the update): no warning with the dir first on PATH"
+PATH="$bin:$PATH" sh "$install" --bin-dir "$bin" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "second install"; }
+has "$tmp/out" "installed rl "
+if grep -q "warning" "$tmp/out"; then cat "$tmp/out" >&2; fail "a warning on update"; fi
+
+step "a dev-shim link is replaced"
+mkdir -p "$tmp/dev"
+ln -s /somewhere/relay/scripts/rl "$tmp/dev/rl"
+sh "$install" --bin-dir "$tmp/dev" >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "over a dev link"; }
+has "$tmp/out" "dev shim"
+[ ! -L "$tmp/dev/rl" ] || fail "still a link"
+
+step "a file that is not relay's is refused and kept"
+mkdir -p "$tmp/other"
+printf '#!/bin/sh\necho mine\n' >"$tmp/other/rl"
+chmod +x "$tmp/other/rl"
+if sh "$install" --bin-dir "$tmp/other" >"$tmp/out" 2>&1; then cat "$tmp/out" >&2; fail "overwrote a foreign rl"; fi
+has "$tmp/out" "not relay's"
+[ "$("$tmp/other/rl")" = mine ] || fail "the file was changed"
+
+step "a tampered download is refused"
+mkdir -p "$tmp/bad/download/v0.0.0-check"
+cp "$rel"/* "$tmp/bad/download/v0.0.0-check/"
+echo "0000  relay-$target.tar.gz" >"$tmp/bad/download/v0.0.0-check/relay-$target.tar.gz.sha256"
+if RELAY_RELEASE_URL="file://$tmp/bad" sh "$install" --bin-dir "$tmp/b2" >"$tmp/out" 2>&1; then
+  cat "$tmp/out" >&2; fail "installed a mismatched download"
+fi
+has "$tmp/out" "does not match its sha256"
+[ ! -e "$tmp/b2/rl" ] || fail "something was installed"
+
+step "a missing release says so"
+if RELAY_VERSION=v9.9.9 sh "$install" --bin-dir "$tmp/b3" >"$tmp/out" 2>&1; then
+  cat "$tmp/out" >&2; fail "installed a release that is not there"
+fi
+has "$tmp/out" "could not download"
+
+step "uninstall removes ours, leaves a foreign one"
+sh "$install" --bin-dir "$bin" --uninstall >"$tmp/out" 2>&1 || fail "uninstall"
+has "$tmp/out" "removed $bin/rl"
+[ ! -e "$bin/rl" ] && [ ! -e "$bin/rl-session" ] || fail "still installed"
+sh "$install" --bin-dir "$tmp/other" --uninstall >"$tmp/out" 2>&1 || fail "uninstall foreign"
+has "$tmp/out" "left alone"
+[ "$("$tmp/other/rl")" = mine ] || fail "uninstall changed a foreign file"
+
+printf '\ncheck-install-release: ok\n'

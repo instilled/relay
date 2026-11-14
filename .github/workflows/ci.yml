@@ -27,5 +27,9 @@ jobs:
       # The install others run: scripts/install into a temp bin dir, then
       # rl --version and rl setup --check under a temp HOME and RELAY_HOME.
       - run: scripts/check-install
+      # The release install: the debug build packed as a release, installed
+      # from disk by the install.sh a release ships.
+      - run: scripts/check-install-release
       - if: runner.os == 'Linux'
-        run: shellcheck scripts/install scripts/check-install scripts/relay-dev scripts/ci scripts/screenshots
+        # -x: follow what a script sources (scripts/demo-stage).
+        run: shellcheck -x scripts/install scripts/check-install scripts/relay-dev scripts/ci scripts/screenshots scripts/demo-stage scripts/demo-video scripts/package scripts/install-release scripts/check-install-release
