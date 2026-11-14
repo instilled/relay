@@ -29,8 +29,30 @@ need them and get back into any of them. Not an orchestrator: no flows, schedule
 
 ## Install
 
-You need Rust (1.96 or newer, from [rustup.rs](https://rustup.rs)), `git` and a C linker (on macOS:
-`xcode-select --install`).
+On macOS (Apple silicon or Intel) or Linux (x86_64 or arm64), no Rust needed:
+
+```sh
+curl -fsSL https://github.com/instilled/relay/releases/latest/download/install.sh | sh
+rl
+```
+
+It downloads `rl` and `rl-session` for your machine, checks their sha256 and puts both in
+`~/.local/bin`. It warns when that folder isn't on your `PATH`, or when another `rl` comes first.
+`--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version vX.Y.Z` (or `RELAY_VERSION`) a
+given release; pass them as `sh -s -- --bin-dir DIR`. **Update:** run the same line again.
+**Uninstall:** `rl setup --remove`, then the same line with `sh -s -- --uninstall`. Everything Relay
+keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names the release and commit; put it
+in bug reports.
+
+The Linux binaries are static (musl), so any distribution runs them. The macOS ones are signed
+ad hoc, not notarized: installed this way macOS doesn't ask. Downloaded from the releases page in a
+browser instead, macOS says it can't verify them; `xattr -d com.apple.quarantine rl rl-session`
+lets them run.
+
+### From a clone
+
+To hack on Relay, or on a machine without a release, build it: you need Rust (1.96 or newer, from
+[rustup.rs](https://rustup.rs)), `git` and a C linker (on macOS: `xcode-select --install`).
 
 ```sh
 git clone https://github.com/instilled/relay && cd relay
@@ -39,14 +61,14 @@ rl
 ```
 
 `scripts/install` checks for those, builds once and links `rl` into `~/.local/bin`; it is safe to
-run again. It warns when that folder isn't on your `PATH`, or when another `rl` comes first (an old
-`cargo install`: `cargo uninstall rl`). `--bin-dir DIR` (or `RELAY_BIN_DIR`) links elsewhere;
-`RELAY_DEV_PROFILE=release` builds and runs release binaries (keep it set where you run `rl`).
+run again, and takes `--bin-dir DIR` too. `RELAY_DEV_PROFILE=release` builds and runs release
+binaries (keep it set where you run `rl`). `rl` runs from your clone and rebuilds itself when the
+source changes, so **update** with `git pull`; **uninstall** with `rl setup --remove`, then
+`scripts/install --uninstall`.
 
-This is a dev install: `rl` runs from your clone and rebuilds itself when the source changes, so
-**update** with `git pull`. `rl --version` names the commit; put it in bug reports. **Uninstall:**
-`rl setup --remove`, then `scripts/install --uninstall`. Everything Relay keeps is in `~/.relay`
-(`RELAY_HOME` moves it).
+**Releasing:** bump `version` in `Cargo.toml`, then push the tag `vX.Y.Z`. The release workflow
+builds the four targets with `scripts/package` and opens a draft release with the tarballs, their
+sha256 and `install.sh` (`scripts/install-release`); publish the draft once it looks right.
 
 ## Setup
 
