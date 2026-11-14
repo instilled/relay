@@ -17,27 +17,27 @@ Claude woken by `claude stop` + `--resume --bg`, its row and mail carried to the
 hooks; ctrl+x hides it and enter says to switch to it there (#228). Hidden rows stay off the
 list even when one needs you, counted on the toggle (`◌ hidden 2`), marked `◌ hidden` when
 shown, and rows move with them shown (#229); a typed line starts in the row's project root, not
-a session's worktree (#230).
+a session's worktree (#230). 2026-11-14: CI runs again (billing), main green; release binaries
+for macOS and Linux built on a tag, `install.sh` installs them without Rust, checked in CI (#231);
+the README opens with a recording (`scripts/demo-video`) and "Why Relay", has Uninstall and the MIT
+license, the screenshots are current, PRODUCT.md is folded in and ARCHITECTURE is a third as long
+(#232).
 
 ## Next
 
-Toward announcing (2026-11-13): it is ready for a quiet beta with people who run more than one
-harness once CI is green and it installs without Rust; a public announcement waits for peek and
-reply and a short demo.
+Toward announcing (2026-11-14): a quiet beta with people who run more than one harness once the
+first release is out and the repo public; a public announcement waits for peek and reply and the
+messaging demo.
 
-* CI green again: the runs for #227 and #228 never started (GitHub billing); re-run them on main.
+* The first release: push `v0.1.0`, check the draft the release workflow opens, publish it; make
+  the repo public. Then confirm live: the `curl … | sh` line on a clean Mac (no quarantine,
+  `xattr`) and on Linux.
 * Peek and reply from the list without attaching (as `claude agents`' space): the core loop of
   watching a pile of agents, today a full attach and `ctrl+\` each time.
-* An install without Rust: release binaries for macOS and Linux (`rl`, `rl-session`) built on a
-  tag, a one-line install in the README; the repo public. Unsigned for the beta: `curl` and a
-  Homebrew formula (not a cask) set no quarantine. arm64 needs an ad-hoc signature or it is
-  `Killed: 9`: Apple's linker adds one when built on a macOS runner (not when cross-compiled), and
-  the release checks `codesign -v`. Confirm live that an installed binary carries no quarantine
-  (`xattr`). A browser download gets the "cannot be verified" dialog; the README gives `xattr -d com.apple.quarantine rl rl-session`.
 * Verify live before strangers hit it: Relay starting the Codex daemon, `/stop` on a Codex turn
   (`turn/interrupt`), `thread/delete`, the Gemini MCP entry.
-* A 60-second demo: a Claude and a Codex on the list, one asks the other to review, the reply
-  comes back.
+* The messaging demo, recorded live (stand-ins would fake it): a Claude and a Codex on the list,
+  one asks the other to review, the reply comes back. The README's recording covers the list.
 * The list ignored SIGTERM once (2026-11-13, a #226 build, no child): find which state doesn't
   listen for the stop, and make every state leave cleanly on it.
 * Verify live that Claude's hooks fire on a session woken with `--resume --bg`.
@@ -53,6 +53,7 @@ reply and a short demo.
 * Lister timeouts that leave no threads lingering.
 * `rl setup --harness X` through the wizard, not only plain output.
 * Compatibility CI: recorded fixtures of the real CLIs, and a nightly run against them.
+* A Homebrew tap (a formula, not a cask, so no quarantine).
 * Notarized macOS binaries, by the public announcement or the first user hitting the dialog:
   the Apple Developer Program (~$99/yr) for a Developer ID; the release workflow runs `codesign`
   and `xcrun notarytool submit --wait`, the cert and an app-specific password as GitHub secrets.
