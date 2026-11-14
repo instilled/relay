@@ -1,11 +1,11 @@
 #!/bin/sh
-# Records the README's demo (docs/img/demo.gif, and demo.mp4 beside it) on
+# Records the README's demo (docs/img/demo.gif) on
 # the made-up Relay scripts/demo-stage sets up: nothing of yours is shown or
 # touched. The list runs in tmux at 110x30; scripts/record.py captures it as
 # it changes and renders the frames.
 #
 #   scripts/demo-video          build, stage, record, render
-#   KEEP=1 scripts/demo-video   keep the temp dir, frames and all
+#   KEEP=1 scripts/demo-video   keep the temp dir, frames and all (demo.mp4 too)
 #
 # Needs tmux, python3, rsvg-convert and ffmpeg.
 set -e
@@ -85,8 +85,8 @@ wait "$rec"
 
 mkdir -p "$out"
 "$python" "$root/scripts/record.py" render --dir "$frames" --cols 110 --rows 30 \
-  --title "rl" --rsvg "$rsvg" --ffmpeg "$ffmpeg" --gif "$out/demo.gif" --mp4 "$out/demo.mp4"
-echo "wrote docs/img/demo.gif and docs/img/demo.mp4" >&2
+  --title "rl" --rsvg "$rsvg" --ffmpeg "$ffmpeg" --gif "$out/demo.gif" --mp4 "$tmp/demo.mp4"
+echo "wrote docs/img/demo.gif" >&2
 
 PATH=$real_path
 # Nothing of the real machine may be in a frame.

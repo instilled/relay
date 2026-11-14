@@ -7,8 +7,7 @@ can message each other. No daemon, no model calls; macOS and Linux.
 ![Relay: typing starts a Codex thread, enter attaches to the Claude that needs you and ctrl+\ comes back, the shells and hidden toggles, grouped by state](docs/img/demo.gif)
 
 <sub>Typing a prompt starts an agent; `enter` attaches, `ctrl+\` comes back and leaves it running;
-`ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by state.
-([MP4](docs/img/demo.mp4); made up, by `scripts/demo-video`.)</sub>
+`ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by state.</sub>
 
 ## Why Relay
 
@@ -22,8 +21,8 @@ can message each other. No daemon, no model calls; macOS and Linux.
   Codex to review its diff and get the answer back.
 - **Nothing leaves your machine.** No account, no server, no daemon, no telemetry, and Relay calls
   no model. It runs your harnesses on your machine and reads what they already keep there; they
-  talk to their models as they always do. Relay's only own calls out go through your `gh`: the
-  `PR #95` badge on a project, and a `/report` issue, posted only on your yes.
+  talk to their models as they always do. `gh` is optional: signed in, a project shows its open
+  PR and `/report` can post an issue, only on your yes; without it, neither asks anything.
 
 For one person running several agents at once, in more than one harness, who wants to see which
 need them and get back into any of them. Not an orchestrator: no flows, schedules or summaries.
