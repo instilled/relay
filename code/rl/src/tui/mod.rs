@@ -335,19 +335,19 @@ fn kitty_supported() -> bool {
 /// `input::typed`). Terminals that don't (Terminal.app, older tmux) simply
 /// see no flags.
 fn enter_screen() -> ratatui::DefaultTerminal {
-    // The input is whatever a session left: answers to questions it put to
-    // the terminal just before letting go, which were never its keys and are
-    // not ours (see `input`).
-    input::discard_pending(std::io::stdin());
     // Coming back from a session, the screen is whatever it left: a
     // full-screen agent keeps its own alternate screen, its scroll region and
     // its colours when it is let go of mid-session, and every mode it asked
     // the terminal for — focus reports, mouse tracking. Leave that screen so
-    // ours starts fresh, and put the region, the colours and the modes back;
-    // ours are asked for again below.
+    // ours starts fresh, put the region, the colours and the modes back, and
+    // ask for our mouse in the same write: with no mouse reporting between a
+    // session letting go and the list asking, a terminal (or tmux) turns the
+    // wheel — a trackpad's momentum too — into arrow keys, and the cursor
+    // walks the list.
     let _ = crossterm::execute!(
         std::io::stdout(),
-        crossterm::style::Print("\x1b[?1049l\x1b[r\x1b[0m\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+        crossterm::style::Print("\x1b[?1049l\x1b[r\x1b[0m\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"),
+        crossterm::style::Print(MOUSE_ON)
     );
     let mut term = ratatui::init();
     // A fresh terminal diffs against an empty buffer, so it would never write
@@ -370,13 +370,20 @@ fn enter_screen() -> ratatui::DefaultTerminal {
     // The wheel and a click reach the list. This also takes the terminal's own
     // drag-to-select, so hold shift (option, on macOS) to copy text as before.
     // A paste comes whole.
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print(MOUSE_ON),
-        EnableBracketedPaste
-    );
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    // The input is whatever came while the screen changed hands: a session's
+    // answers to questions it put to the terminal just before letting go, and
+    // keys or wheel the terminal made of a scroll in between — never ours (see
+    // `input`). Taken last, once the terminal has had a moment with our modes,
+    // so what was on its way is dropped too.
+    std::thread::sleep(SETTLE);
+    input::discard_pending(std::io::stdin());
     term
 }
+
+/// How long the terminal has, with our modes set, before what it sent in
+/// the handover is dropped.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
 
 /// Clicks, drags and the wheel, in SGR (and RXVT) coordinates: crossterm's
 /// `EnableMouseCapture` without any-event tracking (`?1003`), so a pointer
