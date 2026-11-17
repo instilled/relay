@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-/// Relay's own version and the commit it was built from (`build.rs`).
-pub const RELAY_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Relay's own release and the commit it was built from (`build.rs`).
+pub const RELAY_VERSION: &str = rl_core::RELEASE;
 pub const RELAY_COMMIT: &str = env!("RL_GIT_COMMIT");
 
 /// Where issues go: `owner/name` of Relay's repository (Cargo.toml's
@@ -241,7 +241,7 @@ pub fn body(e: &Event) -> String {
     ));
     b.push_str(&format!("### What happened\n\n{}\n\n", e.what));
     b.push_str("### Versions\n\n| | |\n|---|---|\n");
-    b.push_str(&format!("| relay | {} ({}) |\n", e.relay, e.commit));
+    b.push_str(&format!("| relay | {}#{} |\n", e.relay, e.commit));
     b.push_str(&format!("| {} | {} |\n", e.harness, e.version));
     b.push_str(&format!("| OS | {} |\n\n", e.os));
     b.push_str(&format!(
@@ -262,7 +262,7 @@ pub fn body(e: &Event) -> String {
 /// The comment added to an open issue that reports the same already.
 pub fn comment(e: &Event) -> String {
     format!(
-        "Seen again with relay {} ({}) on {}: {} time{}, last {}.\n\nReported from `rl report`.\n",
+        "Seen again with relay {}#{} on {}: {} time{}, last {}.\n\nReported from `rl report`.\n",
         e.relay,
         e.commit,
         e.os,
@@ -507,7 +507,7 @@ pub fn report(dir: &Path, dry_run: bool, input: &mut dyn BufRead, out: &mut dyn 
 /// against what Relay uses of it (`Harness::check`: what is off is noticed
 /// as drift too), then every drift event, reported or not, with its count.
 pub fn doctor(home: &Home, out: &mut dyn Write) -> Result<()> {
-    writeln!(out, "relay {RELAY_VERSION} ({RELAY_COMMIT})")?;
+    writeln!(out, "relay {}", env!("RL_VERSION"))?;
     let registry = rl_detect::Registry::builtin();
     for h in rl_detect::harness::on_path(&registry) {
         let i = h.info();
@@ -611,8 +611,8 @@ mod tests {
             version: "2.1.330".into(),
             what: "`claude agents --json` changed shape; sessions it lists may be missing".into(),
             evidence: Some("entries without sessionId, state".into()),
-            relay: "0.1.0".into(),
-            commit: "c4be74e".into(),
+            relay: "2026.11-17-1".into(),
+            commit: "c4be74e12".into(),
             os: "macos aarch64".into(),
             count: 3,
             first_seen: at("2026-11-01T10:00:00Z"),
@@ -645,7 +645,7 @@ mod tests {
 
 | | |
 |---|---|
-| relay | 0.1.0 (c4be74e) |
+| relay | 2026.11-17-1#c4be74e12 |
 | claude | 2.1.330 |
 | OS | macos aarch64 |
 

@@ -19,7 +19,8 @@ step() { printf '\n== %s\n' "$*"; }
 has() { grep -q -- "$2" "$1" || { cat "$1" >&2; fail "expected '$2'"; }; }
 
 step "pack the debug build as a release"
-(cd "$root" && cargo build -q --workspace --bins) || fail "build"
+# Built as a release is (RELAY_RELEASE), so its name is checked too.
+(cd "$root" && RELAY_RELEASE=2026.01-02-3 cargo build -q --workspace --bins) || fail "build"
 case $(uname -s) in Darwin) os=apple-darwin ;; *) os=unknown-linux-musl ;; esac
 case $(uname -m) in arm64|aarch64) arch=aarch64 ;; *) arch=x86_64 ;; esac
 target="$arch-$os"
@@ -51,7 +52,7 @@ has "$tmp/out" "Next: run rl"
 step "rl --version"
 v=$("$bin/rl" --version)
 echo "$v"
-echo "$v" | grep -Eq '^rl [0-9]+\.[0-9]+\.[0-9]+ \(([0-9a-f]{4,}|unknown)\)$' || fail "version: $v"
+echo "$v" | grep -Eq '^rl 2026\.01-02-3#([0-9a-f]{9}|unknown)$' || fail "version: $v"
 
 step "rl setup --check, with no harness and no cargo on PATH"
 PATH="$bin:/usr/bin:/bin" "$bin/rl" setup --check >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "setup --check"; }

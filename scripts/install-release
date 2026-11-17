@@ -8,7 +8,7 @@
 # puts both in ~/.local/bin. Run it again to update. Safe to run again.
 #
 #   sh install.sh                     the latest release into ~/.local/bin
-#   sh install.sh --version v0.2.0    that release (or RELAY_VERSION=v0.2.0)
+#   sh install.sh --version 2026.11-17-1   that release (or RELAY_VERSION=2026.11-17-1)
 #   sh install.sh --bin-dir DIR       into DIR instead (or RELAY_BIN_DIR=DIR)
 #   sh install.sh --uninstall         remove rl and rl-session from there
 #
@@ -20,7 +20,7 @@ say() { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'relay install: %s\n' "$*" >&2; exit 1; }
 usage() {
-  echo "usage: install.sh [--version vX.Y.Z] [--bin-dir DIR] [--uninstall]" >&2
+  echo "usage: install.sh [--version 2026.11-17-1] [--bin-dir DIR] [--uninstall]" >&2
   exit 2
 }
 
