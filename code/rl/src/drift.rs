@@ -241,7 +241,7 @@ pub fn body(e: &Event) -> String {
     ));
     b.push_str(&format!("### What happened\n\n{}\n\n", e.what));
     b.push_str("### Versions\n\n| | |\n|---|---|\n");
-    b.push_str(&format!("| relay | {}#{} |\n", e.relay, e.commit));
+    b.push_str(&format!("| relay | {}-{} |\n", e.relay, e.commit));
     b.push_str(&format!("| {} | {} |\n", e.harness, e.version));
     b.push_str(&format!("| OS | {} |\n\n", e.os));
     b.push_str(&format!(
@@ -262,7 +262,7 @@ pub fn body(e: &Event) -> String {
 /// The comment added to an open issue that reports the same already.
 pub fn comment(e: &Event) -> String {
     format!(
-        "Seen again with relay {}#{} on {}: {} time{}, last {}.\n\nReported from `rl report`.\n",
+        "Seen again with relay {}-{} on {}: {} time{}, last {}.\n\nReported from `rl report`.\n",
         e.relay,
         e.commit,
         e.os,
@@ -645,7 +645,7 @@ mod tests {
 
 | | |
 |---|---|
-| relay | 2026.11-17#c4be74e12 |
+| relay | 2026.11-17-c4be74e12 |
 | claude | 2.1.330 |
 | OS | macos aarch64 |
 

@@ -1,10 +1,10 @@
 name: release
 
 # Run by hand on main (`gh workflow run release`): names the release by the
-# day (UTC) and the commit, builds rl and rl-session for macOS and Linux as
-# that release (`rl --version`: 2026.11-17#a1b2c3d4e), and opens a draft
-# release tagged 2026.11-17-a1b2c3d4e at that commit, with them, their
-# sha256 and install.sh. Publish the draft by hand once it looks right. The
+# day (UTC) and the commit, 2026.11-17-a1b2c3d4e, builds rl and rl-session
+# for macOS and Linux as that release (what `rl --version` says), and opens a
+# draft release tagged so at that commit, with them, their sha256 and
+# install.sh. Publish the draft by hand once it looks right. The
 # same commit twice is the same release: the second run stops at its tag.
 on:
   workflow_dispatch:

@@ -65,7 +65,7 @@ binaries (keep it set where you run `rl`). `rl` runs from your clone and rebuild
 source changes, so **update** with `git pull`.
 
 **Releasing:** `gh workflow run release` on main. A release is its day and commit: `rl --version`
-says `2026.11-17#a1b2c3d4e` (`dev#…` for a build of your own), its tag is `2026.11-17-a1b2c3d4e`. The workflow builds the four targets with `scripts/package` and opens a draft
+says `2026.11-17-a1b2c3d4e`, which is also its tag (`dev-…` for a build of your own). The workflow builds the four targets with `scripts/package` and opens a draft
 release with the tarballs, their sha256 and `install.sh` (`scripts/install-release`); publish the
 draft once it looks right.
 

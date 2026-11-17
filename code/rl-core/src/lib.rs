@@ -13,7 +13,7 @@ pub const HOME_ENV: &str = "RELAY_HOME";
 /// The release this was built as, named by its day (`2026.11-17`):
 /// `RELAY_RELEASE` at build time, which the release workflow sets; `dev` for
 /// any other build. `rl --version` adds the commit, which tells two releases
-/// of a day apart (`2026.11-17#a1b2c3d4e`). Cargo's own version is a
+/// of a day apart (`2026.11-17-a1b2c3d4e`, the release's tag too). Cargo's own version is a
 /// placeholder.
 pub const RELEASE: &str = match option_env!("RELAY_RELEASE") {
     Some(r) => r,

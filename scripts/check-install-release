@@ -52,7 +52,7 @@ has "$tmp/out" "Next: run rl"
 step "rl --version"
 v=$("$bin/rl" --version)
 echo "$v"
-echo "$v" | grep -Eq '^rl 2026\.01-02#([0-9a-f]{9}|unknown)$' || fail "version: $v"
+echo "$v" | grep -Eq '^rl 2026\.01-02-([0-9a-f]{9}|unknown)$' || fail "version: $v"
 
 step "rl setup --check, with no harness and no cargo on PATH"
 PATH="$bin:/usr/bin:/bin" "$bin/rl" setup --check >"$tmp/out" 2>&1 || { cat "$tmp/out" >&2; fail "setup --check"; }
