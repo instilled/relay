@@ -576,7 +576,7 @@ fn initialize(params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "relay", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "relay", "version": env!("RL_VERSION") },
     })
 }
 

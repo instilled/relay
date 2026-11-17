@@ -1,5 +1,5 @@
 //! `rl --version` says the commit it was built from, so a bug report can
-//! name it: `RL_GIT_COMMIT` is `git rev-parse --short HEAD`, `unknown`
+//! name it: `RL_GIT_COMMIT` is `git rev-parse --short=9 HEAD`, `unknown`
 //! outside a git checkout (or without git). Cargo runs this again when HEAD
 //! moves: a commit, a checkout, a pull.
 
@@ -15,8 +15,13 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let commit = git(&["rev-parse", "--short=9", "HEAD"]).unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=RL_GIT_COMMIT={commit}");
+    // The whole version: the release (rl_core::RELEASE's source) and the
+    // commit, `2026.11-17-a1b2c3d4e` (the release's tag too), or `dev-a1b2c3d4e`.
+    println!("cargo:rerun-if-env-changed=RELAY_RELEASE");
+    let release = std::env::var("RELAY_RELEASE").unwrap_or_else(|_| "dev".into());
+    println!("cargo:rustc-env=RL_VERSION={release}-{commit}");
     // HEAD itself (a checkout), the branch it points at (a commit), and
     // packed-refs (a gc or a fetch that packs it). In a worktree these live
     // in different git dirs; `--git-path` knows where.

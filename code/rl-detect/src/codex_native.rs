@@ -1047,7 +1047,7 @@ impl<R: Read, W: Write> Rpc<R, W> {
         };
         rpc.call(
             "initialize",
-            json!({"clientInfo": {"name": CLIENT, "title": "Relay", "version": env!("CARGO_PKG_VERSION")}}),
+            json!({"clientInfo": {"name": CLIENT, "title": "Relay", "version": rl_core::RELEASE}}),
         )?;
         rpc.ws.send(&json!({"jsonrpc": "2.0", "method": "initialized"}))?;
         Ok(rpc)
