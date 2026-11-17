@@ -611,7 +611,7 @@ mod tests {
             version: "2.1.330".into(),
             what: "`claude agents --json` changed shape; sessions it lists may be missing".into(),
             evidence: Some("entries without sessionId, state".into()),
-            relay: "2026.11-17-1".into(),
+            relay: "2026.11-17".into(),
             commit: "c4be74e12".into(),
             os: "macos aarch64".into(),
             count: 3,
@@ -645,7 +645,7 @@ mod tests {
 
 | | |
 |---|---|
-| relay | 2026.11-17-1#c4be74e12 |
+| relay | 2026.11-17#c4be74e12 |
 | claude | 2.1.330 |
 | OS | macos aarch64 |
 

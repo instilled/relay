@@ -9,7 +9,7 @@ members = [
 exclude = ["vendor"]
 
 [workspace.package]
-# A placeholder Cargo needs: releases are named by date (`2026.11-17-1`,
+# A placeholder Cargo needs: releases are named by date (`2026.11-17`,
 # rl_core::RELEASE), set at build time by the release workflow.
 version = "0.0.0"
 edition = "2024"

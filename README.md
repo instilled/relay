@@ -38,7 +38,7 @@ rl
 
 It downloads `rl` and `rl-session` for your machine, checks their sha256 and puts both in
 `~/.local/bin`. It warns when that folder isn't on your `PATH`, or when another `rl` comes first.
-`--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version 2026.11-17-1` (or `RELAY_VERSION`) a
+`--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version 2026.11-17-a1b2c3d4e` (or `RELAY_VERSION`) a
 given release; pass them as `sh -s -- --bin-dir DIR`. **Update:** run the same line again.
 Everything Relay keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names the release
 and commit; put it in bug reports. To take it out again, see [Uninstall](#uninstall).
@@ -64,9 +64,8 @@ run again, and takes `--bin-dir DIR` too. `RELAY_DEV_PROFILE=release` builds and
 binaries (keep it set where you run `rl`). `rl` runs from your clone and rebuilds itself when the
 source changes, so **update** with `git pull`.
 
-**Releasing:** `gh workflow run release` on main. A release is named by its day and that day's
-count, `2026.11-17-1`, and `rl --version` adds the commit: `2026.11-17-1#a1b2c3d4e` (`dev#…` for a
-build of your own). The workflow builds the four targets with `scripts/package` and opens a draft
+**Releasing:** `gh workflow run release` on main. A release is its day and commit: `rl --version`
+says `2026.11-17#a1b2c3d4e` (`dev#…` for a build of your own), its tag is `2026.11-17-a1b2c3d4e`. The workflow builds the four targets with `scripts/package` and opens a draft
 release with the tarballs, their sha256 and `install.sh` (`scripts/install-release`); publish the
 draft once it looks right.
 
