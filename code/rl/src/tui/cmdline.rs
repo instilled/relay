@@ -54,6 +54,7 @@ impl Commands {
 
     /// The programs on this process's `PATH`.
     pub fn from_env() -> Commands {
+        let _scan = crate::trace::span("commands.scan");
         let dirs: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|p| std::env::split_paths(&p).collect())
             .unwrap_or_default();

@@ -385,6 +385,28 @@ mod tests {
         .expect("the slow one answers in its own time");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn starting_waits_for_no_lister() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let at = std::time::Instant::now();
+        let mut native = Native::start(
+            vec![Box::new(Sleepy {
+                harness: "claude",
+                slow: Duration::from_millis(1500),
+                asked: asked.clone(),
+            })],
+            Duration::from_secs(3600),
+        );
+        // The list draws its first frame now, with nothing of the lister's.
+        assert!(at.elapsed() < Duration::from_millis(500), "{:?}", at.elapsed());
+        assert_eq!(native.said(), Said::default());
+        // Its answer comes in its own time.
+        tokio::time::timeout(Duration::from_secs(10), native.changed())
+            .await
+            .expect("it answers");
+        assert!(native.said().answered.contains("claude"));
+    }
+
     #[tokio::test]
     async fn asked_now_it_does_not_wait_for_the_tick() {
         let said = Arc::new(Mutex::new(Some(vec![row("a")])));

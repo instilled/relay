@@ -311,7 +311,7 @@ impl App {
     /// `tab` on the command line: the word under the cursor completed.
     fn complete_line(&mut self) {
         let (folder, name) = (self.line_folder(), self.name_here());
-        let cmds = self.commands.get_or_init(super::cmdline::Commands::from_env);
+        let cmds = super::app::commands_of(&self.commands, &self.scanning);
         self.cmd.complete(&super::cmdline::Ctx {
             folder: &folder,
             reg: crate::rows::registry(),
