@@ -270,6 +270,9 @@ impl App {
                     self.say("press ctrl+c again to quit");
                 }
             }
+            (KeyCode::Char(' '), m) if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => self.toggle_peek(),
+            // The peek pane closes first, as the grid does.
+            (KeyCode::Esc, _) if self.peek.is_some() => self.peek = None,
             (KeyCode::Esc, _) => {
                 if !self.filter.is_empty() {
                     self.filter.clear();

@@ -20,6 +20,7 @@ mod line;
 mod live;
 mod mark;
 mod onboard;
+mod peek;
 mod remove;
 mod report;
 mod select;
@@ -134,6 +135,7 @@ impl App {
             if let Some((why, at)) = woke.take() {
                 trace::since(why, at);
             }
+            let peek_at = self.peek_due().map(tokio::time::Instant::from_std);
             tokio::select! {
                 ev = input.next() => {
                     woke = Some(("frame.key", trace::now()));
@@ -174,6 +176,15 @@ impl App {
                     match done {
                         Ok(d) => self.done(d),
                         Err(e) => self.say(format!("{e}")),
+                    }
+                }
+                // The peek pane: the row under the cursor asked once it has
+                // settled, and again while it stays; what came, shown.
+                () = until(peek_at) => self.ask_peek(),
+                Some(peeked) = self.peeks.join_next(), if !self.peeks.is_empty() => {
+                    woke = Some(("frame.peek", trace::now()));
+                    if let Ok(p) = peeked {
+                        self.peeked(p);
                     }
                 }
             }

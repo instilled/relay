@@ -28,6 +28,7 @@
 //!   name: [-n, "{name}"]
 //!   stop: [stop, "{id}"]
 //!   remove: [rm, "{id}"]
+//!   logs: [logs, "{id}"]
 //!   rename: { rpc: thread/name/set }
 //! ```
 //!
@@ -105,6 +106,7 @@ pub(crate) struct SessionsFile {
     stop: Option<Vec<String>>,
     ping: Option<Vec<String>>,
     remove: Option<Vec<String>>,
+    logs: Option<Vec<String>>,
     rename: Option<RenameFile>,
 }
 
@@ -185,6 +187,9 @@ impl SessionsFile {
         if over.remove.is_some() {
             self.remove = over.remove;
         }
+        if over.logs.is_some() {
+            self.logs = over.logs;
+        }
         if over.rename.is_some() {
             self.rename = over.rename;
         }
@@ -218,6 +223,10 @@ pub struct Sessions {
     /// its attach id. Empty where it has no way to (or, as Codex, removes
     /// one by a call on its daemon instead).
     pub remove: Vec<String>,
+    /// The arguments that print one's recent terminal output, after its
+    /// binary (`[logs, "{id}"]`): `{id}` is its attach id. What a peek at
+    /// one shows; empty where it has no way to.
+    pub logs: Vec<String>,
     /// How one of its sessions is renamed in the harness itself, where it
     /// can be from outside: none, and its harness says how a name lands.
     pub rename: Option<Rename>,
@@ -376,6 +385,10 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
     if !remove.is_empty() && !remove.iter().any(|a| a.contains(ID)) {
         bail!("{name}.yaml: sessions.remove says nowhere where the id goes ({ID})");
     }
+    let logs = file.logs.unwrap_or_default();
+    if !logs.is_empty() && !logs.iter().any(|a| a.contains(ID)) {
+        bail!("{name}.yaml: sessions.logs says nowhere where the id goes ({ID})");
+    }
     let rename = match file.rename {
         None => None,
         Some(RenameFile { rpc }) if !rpc.trim().is_empty() => Some(Rename::Rpc(rpc)),
@@ -390,6 +403,7 @@ pub(crate) fn compile(name: &str, file: SessionsFile) -> Result<Sessions> {
         stop,
         ping,
         remove,
+        logs,
         rename,
     })
 }
@@ -961,6 +975,8 @@ mod tests {
         );
         assert!(claude.ping.is_empty(), "nothing tells a Claude session from outside");
         assert_eq!(claude.remove, ["rm", ID], "claude rm <id>");
+        assert_eq!(claude.logs, ["logs", ID], "claude logs <id>: what a peek shows");
+        assert!(codex.logs.is_empty(), "codex is peeked at by `thread/read`");
         assert!(
             codex.remove.is_empty(),
             "codex removes by `thread/delete` on its daemon"
@@ -994,6 +1010,7 @@ mod tests {
             (format!("{ok}  attach: [attach]\n"), "{id}"),
             (format!("{ok}  stop: [stop]\n"), "sessions.stop"),
             (format!("{ok}  remove: [rm]\n"), "sessions.remove"),
+            (format!("{ok}  logs: [logs]\n"), "sessions.logs"),
             (
                 format!("{ok}  close: {{ key: r, words: x, done: y, args: [\"{{id}}\"] }}\n"),
                 "close",

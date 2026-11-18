@@ -25,11 +25,13 @@
 //! app-server rejoins a thread that is running (and shows an approval it
 //! waits on), or loads one at rest. Stopping one interrupts its running
 //! turn (`turn/interrupt`); the thread stays. Removing one deletes it for
-//! good (`thread/delete`), its running turn interrupted first.
+//! good (`thread/delete`), its running turn interrupted first. A peek at
+//! one reads its turns (`thread/read`) and shows them in words; it never
+//! starts the daemon.
 
 use crate::harness::{
-    self, Actions, Attach, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, RenameHow, Renamed, Session,
-    Start, Started, held,
+    self, Actions, Attach, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, Peek, RenameHow, Renamed,
+    Session, Start, Started, held,
 };
 use crate::mcp_entry::How;
 use crate::registry::Profile;
@@ -314,6 +316,25 @@ impl Harness for Codex {
         held::notify(&self.profile, &self.bin, s, mail)
     }
 
+    /// Its thread's turns as the daemon has them (`thread/read`), in words:
+    /// what you asked, what it said, what it ran. A thread open elsewhere
+    /// is one on the daemon too. No daemon running: nothing — a peek starts
+    /// none. Held: its holder's screen.
+    fn peek(&self, s: &Session, rows: usize) -> Peek {
+        if let Owner::Relay { .. } = s.owner {
+            return held::peek(s, rows);
+        }
+        if let Err(e) = self.needs(Feature::Peek) {
+            return Peek::Nothing(format!("{e:#}"));
+        }
+        let id = s.id.clone();
+        match connect(&self.argv(&self.list), harness::PEEK_WAIT, move |d| turns(d, &id)) {
+            Ok(Some(lines)) => Peek::last(lines, rows),
+            Ok(None) => Peek::Nothing("codex's daemon is not running".into()),
+            Err(e) => Peek::Nothing(format!("{e:#}")),
+        }
+    }
+
     /// `[mcp_servers.relay]` in its `config.toml`, written by Relay.
     fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>> {
         held::setup(&self.profile, env, How::Toml)
@@ -350,6 +371,8 @@ pub enum Feature {
     Stop,
     /// A thread deleted for good (`^x` twice's remove, `/rm`).
     Remove,
+    /// A peek at a thread: its turns, read off the daemon.
+    Peek,
 }
 
 impl Feature {
@@ -362,6 +385,7 @@ impl Feature {
             Feature::Rename => "rename stays in Relay",
             Feature::Stop => "Relay cannot stop its turns",
             Feature::Remove => "Relay cannot remove its threads",
+            Feature::Peek => "Relay cannot peek at its threads",
         }
     }
 }
@@ -388,7 +412,7 @@ pub struct Use {
 const THREAD_READ: &str = "v2/ThreadReadResponse.json";
 
 /// Everything Relay uses of the app-server's protocol, as the calls below
-/// (`listed`, `begin`, `set_name`, `interrupt`, `delete`, `Rpc::open`) make them:
+/// (`listed`, `begin`, `set_name`, `interrupt`, `delete`, `turns`, `Rpc::open`) make them:
 /// checked against `codex app-server generate-json-schema` once per Codex
 /// (`compat`).
 pub const USES: &[Use] = &[
@@ -482,6 +506,23 @@ pub const USES: &[Use] = &[
                 file: THREAD_READ,
                 def: Some("Turn"),
                 fields: &["id", "status"],
+            },
+        ],
+    },
+    Use {
+        method: "thread/read",
+        feature: Feature::Peek,
+        sends: &["threadId", "includeTurns"],
+        reads: &[
+            Reads {
+                file: THREAD_READ,
+                def: Some("Thread"),
+                fields: &["turns"],
+            },
+            Reads {
+                file: THREAD_READ,
+                def: Some("Turn"),
+                fields: &["items"],
             },
         ],
     },
@@ -983,6 +1024,58 @@ pub fn interrupt<R: Read, W: Write>(rpc: &mut Rpc<R, W>, id: &str) -> Result<()>
         .to_string();
     rpc.call("turn/interrupt", json!({"threadId": id, "turnId": turn}))?;
     Ok(())
+}
+
+/// The thread `id`'s turns in words (`thread/read` with its turns), oldest
+/// first: each prompt you gave it (`› …`), what it said, each command it
+/// ran (`$ …`), each file it changed (`~ …`), each tool it called (`· …`).
+/// An item of a kind not known here says nothing.
+pub fn turns<R: Read, W: Write>(rpc: &mut Rpc<R, W>, id: &str) -> Result<Vec<String>> {
+    let read = rpc.call("thread/read", json!({"threadId": id, "includeTurns": true}))?;
+    let turns = read["thread"]["turns"]
+        .as_array()
+        .context("`thread/read` said no turns")?;
+    Ok(turns
+        .iter()
+        .flat_map(|t| t["items"].as_array().into_iter().flatten())
+        .flat_map(item_lines)
+        .collect())
+}
+
+/// One item of a turn, in lines: none for one with nothing to say.
+fn item_lines(item: &Value) -> Vec<String> {
+    let s = |k: &str| item[k].as_str().unwrap_or_default();
+    // The first line marked, the rest under it.
+    let marked = |m: &str, text: &str| -> Vec<String> {
+        text.lines()
+            .enumerate()
+            .map(|(i, l)| if i == 0 { format!("{m}{l}") } else { format!("  {l}") })
+            .collect()
+    };
+    match s("type") {
+        "userMessage" => {
+            let text: Vec<&str> = item["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["text"].as_str())
+                .collect();
+            marked("› ", &text.join("\n"))
+        }
+        "agentMessage" | "plan" => s("text").lines().map(str::to_string).collect(),
+        "commandExecution" => marked("$ ", s("command")),
+        "fileChange" => item["changes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["path"].as_str())
+            .map(|p| format!("~ {p}"))
+            .collect(),
+        "mcpToolCall" => vec![format!("· {}.{}", s("server"), s("tool"))],
+        "dynamicToolCall" => vec![format!("· {}", s("tool"))],
+        "webSearch" => vec![format!("· search {}", s("query"))],
+        _ => Vec::new(),
+    }
 }
 
 /// Deletes the thread `id` for good (`thread/delete`); with `stops`, the
