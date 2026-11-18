@@ -90,6 +90,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    rl::trace::born();
     // `rl hook` is read before clap reads anything: a hook never fails the
     // agent that called it, nor prints.
     if let Some(words) = hook::args() {
@@ -106,6 +107,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let home = Home::resolve()?;
+    rl::trace::open(&home);
     rl::drift::install(&home);
     let Some(command) = cli.command else {
         use std::io::IsTerminal;

@@ -108,6 +108,7 @@ pub async fn drive(
                         alt.watch(&b);
                         out.write_all(&b).await?;
                         out.flush().await?;
+                        crate::trace::end("attach.held");
                     }
                     Some(Frame::ReplayEnd) => {
                         if size.is_some() {
@@ -167,6 +168,8 @@ pub async fn drive(
         }
     }
     .await;
+    crate::trace::begin("return.held");
+    crate::trace::begin("return.handback");
 
     // Gone inside the nudge: the session is not left a row short.
     if restore.is_some()
@@ -271,7 +274,10 @@ pub async fn open(dir: &Path, meta: &Meta) -> Result<Opened> {
 pub async fn attach(home: &Home, meta: &Meta) -> Result<Ended> {
     let dir = home.session_dir(&meta.name);
     let mut out = tokio::io::stdout();
-    let (hello, session) = match open(&dir, meta).await? {
+    let connect = crate::trace::span("attach.connect");
+    let opened = open(&dir, meta).await?;
+    drop(connect);
+    let (hello, session) = match opened {
         Opened::Holder(hello, session) => (*hello, session),
         Opened::Over(ended, words) => {
             out.write_all(dim(&words).as_bytes()).await?;

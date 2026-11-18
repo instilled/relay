@@ -34,7 +34,7 @@ pub use app::App;
 use app::{Hand, To};
 
 use crate::store::sessions;
-use crate::{attach, badges, sources};
+use crate::{attach, badges, sources, trace};
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, EventStream, KeyEventKind,
@@ -53,18 +53,25 @@ const NATIVE_EVERY: Duration = Duration::from_secs(5);
 
 /// Opens the list on this terminal, until `^c ^c`.
 pub async fn run(home: &Home) -> Result<()> {
+    trace::since_born("start.before_list");
+    let store = trace::span("start.store");
     home.ensure_store()?;
     sessions::sweep(home);
     if let Err(e) = badges::seed(home) {
         tracing::debug!("badges not seeded: {e:#}");
     }
+    drop(store);
+    let made = trace::span("start.app");
     let mut app = App::new(home.clone())?;
+    drop(made);
     // Listened for before the screen is taken: a signal that comes while the
     // terminal is being set up waits for the loop, which gives it back.
     let mut stop = attach::Stop::new()?;
     guard_panics();
-    let mut terminal = enter_screen();
-    let result = app.main_loop(&mut terminal, &mut stop).await;
+    let screen = trace::span("start.screen");
+    let (mut terminal, settling) = take_screen();
+    drop(screen);
+    let result = app.main_loop(&mut terminal, &mut stop, settling).await;
     // A stop during an attach leaves with the screen already given back.
     if result.as_ref().map_or(true, |on_screen| *on_screen) {
         leave_screen();
@@ -79,8 +86,25 @@ pub async fn run(home: &Home) -> Result<()> {
 impl App {
     /// Runs until `^c ^c` or a signal in `stop`; whether the screen is ours
     /// still (it is not where a stop came during an attach).
-    async fn main_loop(&mut self, terminal: &mut ratatui::DefaultTerminal, stop: &mut attach::Stop) -> Result<bool> {
-        let mut input = EventStream::new();
+    async fn main_loop(
+        &mut self,
+        terminal: &mut ratatui::DefaultTerminal,
+        stop: &mut attach::Stop,
+        settling: Settling,
+    ) -> Result<bool> {
+        // The listers start asking at once, each on its own; the first frame
+        // does not wait for them: their rows join the list as they answer.
+        let listers = trace::span("start.listers");
+        let mut native = live::Native::start(sources::native_listers(), NATIVE_EVERY);
+        drop(listers);
+        self.scan_commands();
+        let mut title = String::new();
+        // The first frame goes up while the terminal settles; what is left of
+        // the settle is spent on the rest of the start, then the input is
+        // read.
+        self.frame(terminal, &mut title)?;
+        trace::since_born("start");
+        let watching = trace::span("start.watch");
         let mut watch = match live::Watch::start(&self.home) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -88,45 +112,70 @@ impl App {
                 None
             }
         };
-        let mut native = live::Native::start(sources::native_listers(), NATIVE_EVERY);
+        drop(watching);
         self.check_setup();
+        settling.done();
+        trace::since_born("start.settled");
+        let mut input = EventStream::new();
         let mut tick = tokio::time::interval(REFRESH);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
         // A change under the watched folders reads them again once the burst
         // has had `DEBOUNCE` to settle.
         let mut due: Option<tokio::time::Instant> = None;
-        let mut title = String::new();
+        // The rows read again off the UI thread (`Reads`): the files' changes,
+        // the tick, and what the harnesses say are read there, so a key
+        // meanwhile is not kept waiting.
+        let mut reads = Reads::default();
+        // What woke the list, and when: timed to its frame (`trace`).
+        let mut woke: Option<(&'static str, Option<std::time::Instant>)> = None;
         while !self.quit {
-            terminal.draw(|f| self.draw(f))?;
-            let now = self.title();
-            if now != title {
-                let _ = write!(std::io::stdout(), "{}", crate::attach::title(&now));
-                let _ = std::io::stdout().flush();
-                title = now;
+            self.frame(terminal, &mut title)?;
+            if let Some((why, at)) = woke.take() {
+                trace::since(why, at);
             }
             tokio::select! {
-                ev = input.next() => self.events(ev, &mut input).await?,
+                ev = input.next() => {
+                    woke = Some(("frame.key", trace::now()));
+                    self.events(ev, &mut input).await?;
+                }
                 () = stop.recv() => self.quit = true,
                 () = changed(&mut watch) => {
                     due.get_or_insert_with(|| tokio::time::Instant::now() + live::DEBOUNCE);
                 }
                 () = until(due) => {
                     due = None;
-                    self.reload();
+                    reads.ask(self);
                 }
                 _ = tick.tick() => {
-                    self.reload();
+                    woke = Some(("frame.tick", trace::now()));
                     self.regit();
+                    reads.ask(self);
                 }
                 () = native.changed() => {
+                    woke = Some(("frame.native", trace::now()));
                     let said = native.said();
-                    self.heard(said);
+                    self.heard_native(said);
+                    reads.ask(self);
                 }
-                Some(done) = self.work.join_next(), if !self.work.is_empty() => match done {
-                    Ok(d) => self.done(d),
-                    Err(e) => self.say(format!("{e}")),
-                },
+                read = reads.next() => {
+                    woke = Some(("frame.read", trace::now()));
+                    match read {
+                        Some((at, rows)) => {
+                            self.read_done(at, rows);
+                        }
+                        // The read went wrong: read here instead.
+                        None => self.reload(),
+                    }
+                    reads.again(self);
+                }
+                Some(done) = self.work.join_next(), if !self.work.is_empty() => {
+                    woke = Some(("frame.work", trace::now()));
+                    match done {
+                        Ok(d) => self.done(d),
+                        Err(e) => self.say(format!("{e}")),
+                    }
+                }
             }
             if std::mem::take(&mut self.ask_native) {
                 native.ask_now();
@@ -135,6 +184,12 @@ impl App {
             // the session gets it, passed through; the list comes back when
             // it lets go. The harnesses are not asked meanwhile.
             if let Some(hand) = self.hand.take() {
+                // What woke the list is not timed over the attach.
+                woke = None;
+                trace::begin(match hand.to {
+                    To::Held(_) => "attach.held",
+                    _ => "attach.native",
+                });
                 drop(input);
                 leave_screen();
                 native.pause();
@@ -145,16 +200,28 @@ impl App {
                     // given back.
                     () = stop.recv() => return Ok(false),
                 };
+                trace::end("return.handback");
                 native.resume();
                 // A native attach lets go on a stop by itself, and says
                 // nothing; the list stops with it, screen untouched.
                 if stop.came() {
                     return Ok(false);
                 }
-                *terminal = enter_screen();
-                input = EventStream::new();
+                let screen = trace::span("return.screen");
+                let (t, settling) = take_screen();
+                *terminal = t;
+                drop(screen);
                 title.clear();
+                // The list read again and drawn while the terminal settles;
+                // then what came in the handover is dropped.
+                let back = trace::span("return.back");
                 self.back(&hand.key, words);
+                drop(back);
+                self.frame(terminal, &mut title)?;
+                trace::end("return.held");
+                trace::end("return.native");
+                settling.done();
+                input = EventStream::new();
             }
             // `/setup`: the wizard has the terminal, under the list's
             // screen, until it is over; then the list again, checked anew.
@@ -167,8 +234,8 @@ impl App {
                 let ran =
                     tokio::task::spawn_blocking(move || wizard::run(&home, &host, wizard::model::Came::List)).await;
                 native.resume();
-                *terminal = enter_screen();
-                input = EventStream::new();
+                let (t, settling) = take_screen();
+                *terminal = t;
                 title.clear();
                 match ran {
                     Ok(Ok(o)) => self.say(o.said),
@@ -176,6 +243,9 @@ impl App {
                     Err(e) => self.say(format!("setup: {e}")),
                 }
                 self.check_setup();
+                self.frame(terminal, &mut title)?;
+                settling.done();
+                input = EventStream::new();
             }
             // `/report`: the report has the terminal, as the wizard does.
             if std::mem::take(&mut self.reporting) {
@@ -185,19 +255,89 @@ impl App {
                 let dir = crate::drift::dir(&self.home);
                 let ran = tokio::task::spawn_blocking(move || report::run(&dir)).await;
                 native.resume();
-                *terminal = enter_screen();
-                input = EventStream::new();
+                let (t, settling) = take_screen();
+                *terminal = t;
                 title.clear();
                 match ran {
                     Ok(Ok(())) => self.say("back from /report"),
                     Ok(Err(e)) => self.say(format!("report: {e:#}")),
                     Err(e) => self.say(format!("report: {e}")),
                 }
+                self.frame(terminal, &mut title)?;
+                settling.done();
+                input = EventStream::new();
             }
         }
         Ok(true)
     }
+
+    /// The list drawn, as one update of the screen where the terminal
+    /// takes it so (synchronized output), and the window's title where it
+    /// changed.
+    fn frame(&self, terminal: &mut ratatui::DefaultTerminal, title: &mut String) -> Result<()> {
+        let drawing = trace::now();
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{SYNC_ON}");
+        let drawn = terminal.draw(|f| self.draw(f));
+        let _ = write!(out, "{SYNC_OFF}");
+        let _ = out.flush();
+        drawn?;
+        trace::since("draw", drawing);
+        let now = self.title();
+        if now != *title {
+            let _ = write!(out, "{}", crate::attach::title(&now));
+            let _ = out.flush();
+            *title = now;
+        }
+        Ok(())
+    }
 }
+
+/// The rows read again off the UI thread, one read at a time: one asked for
+/// while another runs follows it, so what changed meanwhile is not missed.
+#[derive(Default)]
+struct Reads {
+    task: Option<tokio::task::JoinHandle<(u64, Vec<sources::Row>)>>,
+    again: bool,
+}
+
+impl Reads {
+    /// A read of what `app` is read from now, or once the one under way is
+    /// done.
+    fn ask(&mut self, app: &mut App) {
+        if self.task.is_some() {
+            self.again = true;
+            return;
+        }
+        let (at, home, native) = app.to_read();
+        self.task = Some(tokio::task::spawn_blocking(move || {
+            (at, app::read_rows(&home, &native))
+        }));
+    }
+
+    /// The read asked for while the last one ran, now.
+    fn again(&mut self, app: &mut App) {
+        if std::mem::take(&mut self.again) {
+            self.ask(app);
+        }
+    }
+
+    /// What the read under way read, once it is done; `None` where it went
+    /// wrong. Never, with none under way.
+    async fn next(&mut self) -> Option<(u64, Vec<sources::Row>)> {
+        let Some(task) = self.task.as_mut() else {
+            return std::future::pending().await;
+        };
+        let read = task.await.ok();
+        self.task = None;
+        read
+    }
+}
+
+/// Synchronized output (mode 2026): what is written between the two is
+/// shown at once, not as it comes. A terminal without it ignores both.
+const SYNC_ON: &str = "\x1b[?2026h";
+const SYNC_OFF: &str = "\x1b[?2026l";
 
 /// The most events taken in one go before the list is drawn again.
 const BURST: usize = 256;
@@ -334,7 +474,15 @@ fn kitty_supported() -> bool {
 /// away (shift on the arrows), and to say what shift made of a key (see
 /// `input::typed`). Terminals that don't (Terminal.app, older tmux) simply
 /// see no flags.
-fn enter_screen() -> ratatui::DefaultTerminal {
+///
+/// The screen is not shown until the first frame is drawn (synchronized
+/// output, begun here; `App::frame` ends it), so a terminal that has it
+/// never shows the session's screen half taken away, nor a blank one. The
+/// terminal is then settling: the first frame is drawn meanwhile, and
+/// `Settling::done` drops what came in the handover before the input is
+/// read.
+fn take_screen() -> (ratatui::DefaultTerminal, Settling) {
+    let _ = write!(std::io::stdout(), "{SYNC_ON}");
     // Coming back from a session, the screen is whatever it left: a
     // full-screen agent keeps its own alternate screen, its scroll region and
     // its colours when it is let go of mid-session, and every mode it asked
@@ -371,14 +519,37 @@ fn enter_screen() -> ratatui::DefaultTerminal {
     // drag-to-select, so hold shift (option, on macOS) to copy text as before.
     // A paste comes whole.
     let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
-    // The input is whatever came while the screen changed hands: a session's
-    // answers to questions it put to the terminal just before letting go, and
-    // keys or wheel the terminal made of a scroll in between — never ours (see
-    // `input`). Taken last, once the terminal has had a moment with our modes,
-    // so what was on its way is dropped too.
-    std::thread::sleep(SETTLE);
-    input::discard_pending(std::io::stdin());
-    term
+    (
+        term,
+        Settling {
+            since: std::time::Instant::now(),
+        },
+    )
+}
+
+/// The screen just taken, our modes set `since`: until `SETTLE` after, what
+/// the input holds is the handover's.
+#[must_use]
+struct Settling {
+    since: std::time::Instant,
+}
+
+impl Settling {
+    /// The input is whatever came while the screen changed hands: a
+    /// session's answers to questions it put to the terminal just before
+    /// letting go, and keys or wheel the terminal made of a scroll in between
+    /// — never ours (see `input`). Taken once the terminal has had `SETTLE`
+    /// with our modes, so what was on its way is dropped too; what was done
+    /// since they were set (the first frame) counts towards it.
+    fn done(self) {
+        self.wait();
+        input::discard_pending(std::io::stdin());
+    }
+
+    /// Until `SETTLE` after our modes were set.
+    fn wait(&self) {
+        std::thread::sleep(SETTLE.saturating_sub(self.since.elapsed()));
+    }
 }
 
 /// How long the terminal has, with our modes set, before what it sent in
@@ -400,6 +571,9 @@ const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h";
 /// session attached next would get a terminal with its cursor switched off,
 /// and most never switch it back on. The next draw hides it again.
 fn leave_screen() {
+    // A screen taken and left before its first frame (a failure, a panic)
+    // ends its synchronized update too.
+    let _ = write!(std::io::stdout(), "{SYNC_OFF}");
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     if kitty_supported() {
         let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);

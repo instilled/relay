@@ -46,7 +46,9 @@ Folders are the truth: liveness is read from files and sockets; every write is `
 
 - **Sources.** Held sessions from `sessions/`, hooked ones from `state/`, Claude's and Codex's own by
   asking them (`Harness::sessions`), each on its own task and interval (`tui::live`): a slow one holds
-  up no other, a failing one keeps its last rows marked stale.
+  up no other, a failing one keeps its last rows marked stale. The first frame waits for none of
+  them. What the file watch, the 3s tick and a lister's answer make the list read again is read off
+  the UI thread (`tui::Reads`), one read at a time; a read begun before a newer one is dropped.
 - **Rows.** `rows/` merges and dedupes them (a native row hides the hooked row of the same session)
   and groups them under a project: a folder you named, else its git checkout (`git::project`;
   worktrees under their main one). State comes from the hooks, then the harness's listing, then
@@ -55,7 +57,11 @@ Folders are the truth: liveness is read from files and sockets; every write is `
   as its prompt; `!` runs the line in a held shell; `/` is a command.
 - **Attach.** A held session: its socket, the screen, then live bytes; `ctrl+\` detaches. A native
   one: its harness's attach argv in this terminal (`attach::native`). Which a row gets is
-  `Harness::attach`.
+  `Harness::attach`. Coming back, the list takes the screen in one synchronized update and draws its
+  first frame while the terminal settles (60 ms); what the terminal sent in the handover is dropped
+  after, before any input is read.
+- **Timing.** `RL_TRACE=1` writes each phase's milliseconds to `$RELAY_HOME/trace.log` (`trace`):
+  the start, key → frame, reads, attach and return. Off, it costs nothing.
 - **Actions.** Stop, remove and rename are whatever `Harness::actions` offers; a refusal's stderr
   stands in the footer and the row stays. A name a harness can't take stays Relay's.
 

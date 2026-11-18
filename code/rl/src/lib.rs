@@ -17,4 +17,5 @@ pub mod setup;
 pub mod sources;
 pub mod spawn;
 pub mod store;
+pub mod trace;
 pub mod tui;

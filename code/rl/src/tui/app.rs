@@ -13,6 +13,7 @@ use crate::setup;
 use crate::sources::{self, Row};
 use crate::store::sessions::{self, Meta};
 use crate::store::state;
+use crate::trace;
 use anyhow::Result;
 use jiff::Timestamp;
 use rl_core::Home;
@@ -164,6 +165,10 @@ pub struct App {
     pub rows: Vec<Row>,
     /// The harnesses' own sessions, as their listers last said.
     pub native: Said,
+    /// Counts what the rows are read from changing (a reload, the
+    /// harnesses' rows): a read off the UI thread begun before is passed
+    /// over (`read_done`).
+    read: u64,
     /// The checkouts of the projects' folders.
     pub checkouts: Checkouts,
     badges: Badges,
@@ -181,6 +186,9 @@ pub struct App {
     pub cmd: CmdLine,
     /// The programs on `PATH`, read the first time the line wants them.
     pub commands: OnceCell<Commands>,
+    /// Their reading under way off the UI thread (`scan_commands`), which
+    /// the first that wants them takes.
+    pub(super) scanning: Cell<Option<std::sync::mpsc::Receiver<Commands>>>,
     /// The folder `rl` was started in: where a line starts with nothing
     /// under the cursor.
     pub started_in: PathBuf,
@@ -233,6 +241,7 @@ impl App {
             config_at,
             rows: Vec::new(),
             native: Said::default(),
+            read: 0,
             checkouts: Checkouts::new(),
             badges,
             prs: HashMap::new(),
@@ -242,6 +251,7 @@ impl App {
             search: None,
             cmd: CmdLine::default(),
             commands: OnceCell::new(),
+            scanning: Cell::new(None),
             started_in: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             mode: Mode::List,
             hand: None,
@@ -273,10 +283,35 @@ impl App {
     /// last said. A project new to the list gets its checkout at once; the
     /// rest wait for the tick.
     pub fn reload(&mut self) {
+        let _all = trace::span("reload");
         self.heard_config();
-        let held = sessions::list(&self.home);
-        let hooked = state::list(&self.home, Timestamp::now());
-        self.rows = sources::rows(&held, &hooked, &self.native.rows, &self.native.answered);
+        self.read += 1;
+        let rows = read_rows(&self.home, &self.native);
+        self.take_rows(rows);
+    }
+
+    /// What reading the rows again takes, for `read_rows` off the UI
+    /// thread; `read_done` takes what it read.
+    pub fn to_read(&mut self) -> (u64, Home, Said) {
+        self.heard_config();
+        (self.read, self.home.clone(), self.native.clone())
+    }
+
+    /// The rows read off the UI thread for `to_read`'s `read`. Passed over
+    /// where they were read before what the list has now — a reload since,
+    /// or the harnesses' rows changed — false then.
+    pub fn read_done(&mut self, read: u64, rows: Vec<Row>) -> bool {
+        if read != self.read {
+            return false;
+        }
+        let _all = trace::span("reload.taken");
+        self.take_rows(rows);
+        true
+    }
+
+    /// `rows`, just read, on the list.
+    fn take_rows(&mut self, rows: Vec<Row>) {
+        self.rows = rows;
         self.rebuild();
         let folders = rows::project_folders(&self.rows, &self.config.list);
         if folders
@@ -285,7 +320,9 @@ impl App {
         {
             self.regit();
         }
+        let settle = trace::span("reload.settle");
         self.settle();
+        drop(settle);
         if let Some(k) = self.awaiting.take() {
             if self.keys().contains(&k) {
                 self.select(Some(k));
@@ -311,6 +348,7 @@ impl App {
 
     /// The projects' checkouts again, and what their badges last said.
     pub fn regit(&mut self) {
+        let _all = trace::span("regit");
         let folders = rows::project_folders(&self.rows, &self.config.list);
         self.checkouts = git::checkouts(&folders, &self.badges, &self.config.badges);
         self.rebuild();
@@ -335,7 +373,17 @@ impl App {
     /// rows that its harness now calls it too is Relay's no longer: the
     /// harness's own stands alone (a rename that reached it).
     pub fn heard(&mut self, said: Said) {
+        self.heard_native(said);
+        self.reload();
+    }
+
+    /// `heard`, but for reading the rows again: that is the caller's
+    /// (`main_loop` does it off the UI thread).
+    pub fn heard_native(&mut self, said: Said) {
+        let _all = trace::span("heard");
         self.native = said;
+        // What is being read now has the harnesses' old rows.
+        self.read += 1;
         let same: Vec<String> = self
             .native
             .rows
@@ -351,7 +399,6 @@ impl App {
                 }
             });
         }
-        self.reload();
     }
 
     /// The native rows, as if every lister had answered with them.
@@ -419,6 +466,7 @@ impl App {
     fn with_built<T>(&self, f: impl FnOnce(&[Slot]) -> T) -> T {
         let mut built = self.built.borrow_mut();
         if built.as_ref().is_none_or(|b| b.filter != self.filter) {
+            let _build = trace::span("build");
             // Every row a line holds is one of `self.rows`: found by where it is.
             let at: HashMap<*const Row, usize> = self
                 .rows
@@ -516,7 +564,31 @@ impl App {
 
     /// The programs on `PATH`, read once.
     pub fn commands(&self) -> &Commands {
-        self.commands.get_or_init(Commands::from_env)
+        commands_of(&self.commands, &self.scanning)
+    }
+
+    /// `PATH` read off the UI thread, from now: a big one takes a while,
+    /// and the first frame and the first key do not wait for it.
+    pub fn scan_commands(&self) {
+        if self.commands.get().is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("rl-path".into()).spawn(move || {
+            let _ = tx.send(Commands::from_env());
+        });
+        if spawned.is_ok() {
+            self.scanning.set(Some(rx));
+        }
+    }
+
+    /// What the line would start, or nothing; `PATH` is not wanted while
+    /// nothing is typed.
+    fn detected_in(&self, text: &str) -> Option<cmdline::Detected<'static>> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        cmdline::detect(text, rows::registry(), self.commands(), &self.config.list.default)
     }
 
     /// Where a line typed now starts: the project root of the row under the
@@ -534,18 +606,13 @@ impl App {
 
     /// What the line typed would start, if anything is typed.
     pub fn detected(&self) -> Option<cmdline::Detected<'static>> {
-        cmdline::detect(
-            self.cmd.line.text(),
-            rows::registry(),
-            self.commands(),
-            &self.config.list.default,
-        )
+        self.detected_in(self.cmd.line.text())
     }
 
     /// The line's ghost again, after a key changed it.
     pub fn retyped(&mut self) {
         let (folder, name) = (self.line_folder(), self.name_here());
-        let cmds = self.commands.get_or_init(Commands::from_env);
+        let cmds = commands_of(&self.commands, &self.scanning);
         self.cmd.typed(&cmdline::Ctx {
             folder: &folder,
             reg: rows::registry(),
@@ -559,6 +626,32 @@ impl App {
     pub fn title(&self) -> String {
         rows::headline(&self.lines(), &self.filter)
     }
+}
+
+/// Every row, from the session and hook files under `home` and the
+/// harnesses' rows `native` said: the costly part of a reload, which
+/// touches nothing of the list's, so it can be done off the UI thread.
+pub fn read_rows(home: &Home, native: &Said) -> Vec<Row> {
+    let files = trace::span("reload.files");
+    let held = sessions::list(home);
+    let hooked = state::list(home, Timestamp::now());
+    drop(files);
+    let _made = trace::span("reload.rows");
+    sources::rows(&held, &hooked, &native.rows, &native.answered)
+}
+
+/// The programs on `PATH`: as kept, else as the scan under way says (waited
+/// for), else read now.
+pub(super) fn commands_of<'a>(
+    kept: &'a OnceCell<Commands>,
+    scanning: &Cell<Option<std::sync::mpsc::Receiver<Commands>>>,
+) -> &'a Commands {
+    kept.get_or_init(|| {
+        scanning
+            .take()
+            .and_then(|rx| rx.recv().ok())
+            .unwrap_or_else(Commands::from_env)
+    })
 }
 
 /// When `config.json` in `home` was last changed; None where it is not.
