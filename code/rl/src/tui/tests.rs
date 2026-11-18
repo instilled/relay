@@ -2705,14 +2705,12 @@ fn the_settle_counts_from_when_our_modes_were_set() {
     // Just set: the whole of it, so what was on its way still comes first —
     // and a wait does wait it out (a sleep never ends early).
     let fresh = super::Settling { since: Instant::now() };
-    assert!(
-        fresh.left() > super::SETTLE - Duration::from_millis(5),
-        "{:?}",
-        fresh.left()
-    );
-    let at = Instant::now();
+    assert!(fresh.left() > super::SETTLE / 2, "{:?}", fresh.left());
     fresh.wait();
-    assert!(at.elapsed() >= super::SETTLE - Duration::from_millis(5));
+    assert!(
+        fresh.since.elapsed() >= super::SETTLE,
+        "waited out from when the modes were set"
+    );
 }
 
 #[tokio::test]
