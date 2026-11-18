@@ -2687,3 +2687,109 @@ async fn a_conversation_carried_on_from_another_terminal_takes_what_you_kept_for
         "the old row hidden, as /hide does"
     );
 }
+
+#[test]
+fn the_settle_counts_from_when_our_modes_were_set() {
+    use std::time::{Duration, Instant};
+    // The first frame took most of it already: only the rest is waited.
+    let late = super::Settling {
+        since: Instant::now() - Duration::from_millis(50),
+    };
+    let at = Instant::now();
+    late.wait();
+    assert!(at.elapsed() < Duration::from_millis(40), "{:?}", at.elapsed());
+    // Just set: the whole of it, so what was on its way still comes first.
+    let fresh = super::Settling { since: Instant::now() };
+    let at = Instant::now();
+    fresh.wait();
+    assert!(at.elapsed() >= super::SETTLE - Duration::from_millis(1));
+}
+
+#[tokio::test]
+async fn nothing_typed_reads_no_path_and_a_scan_under_way_is_what_the_line_gets() {
+    let f = fixture();
+    let app = App::new(f.home.clone()).unwrap();
+    // The list drawn with an empty line: `PATH` is not read for it.
+    shown(&app);
+    assert!(app.detected().is_none());
+    assert!(app.commands.get().is_none(), "no PATH read for an empty line");
+    // A scan under way is waited for, not done again.
+    let bin = f.repo.parent().unwrap().join("bin");
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.scanning.set(Some(rx));
+    tx.send(super::cmdline::bin_dir(&bin, &["only-here"])).unwrap();
+    assert!(app.commands().has("only-here"));
+    assert!(!app.commands().has("sh"), "the scan's, not this PATH");
+}
+
+#[tokio::test]
+async fn coming_back_does_not_wait_for_the_badges() {
+    let f = fixture();
+    std::fs::write(f.home.config_json(), r#"{"badges": ["sleep 5; echo slow"]}"#).unwrap();
+    let at = std::time::Instant::now();
+    let mut app = App::new(f.home.clone()).unwrap();
+    app.back("r:shop-sh", "let go of shop-sh · it keeps going".into());
+    app.regit();
+    shown(&app);
+    assert!(
+        at.elapsed() < std::time::Duration::from_secs(2),
+        "the list is read and drawn while the badge is still asked: {:?}",
+        at.elapsed()
+    );
+    assert!(shown(&app).contains("⎇ trunk"), "the checkout is there at once");
+}
+
+#[tokio::test]
+async fn rows_read_off_the_ui_thread_are_taken_unless_read_before_what_the_list_has() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let (at, home, native) = app.to_read();
+    let rows = super::app::read_rows(&home, &native);
+    assert_eq!(rows, app.rows, "what a reload reads");
+    // A reload since: what it read is newer.
+    app.reload();
+    assert!(!app.read_done(at, rows.clone()));
+    let (at, ..) = app.to_read();
+    assert!(app.read_done(at, rows.clone()));
+    // The harnesses said something new since: read with their old rows.
+    let (at, ..) = app.to_read();
+    app.heard_native(app.native.clone());
+    assert!(!app.read_done(at, Vec::new()));
+    assert_eq!(app.rows, rows, "passed over");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reads_asked_for_while_one_runs_are_one_more_after_it() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let mut reads = super::Reads::default();
+    for _ in 0..3 {
+        reads.ask(&mut app);
+    }
+    let (at, rows) = reads.next().await.expect("read");
+    assert!(app.read_done(at, rows));
+    // A session that came meanwhile is in the one more.
+    let dir = f.home.session_dir("late-sh");
+    std::fs::create_dir_all(&dir).unwrap();
+    sessions::write_meta(
+        &dir,
+        &Meta {
+            name: "late-sh".into(),
+            harness: "sh".into(),
+            kind: RunKind::Shell,
+            cwd: f.repo.clone(),
+            argv: vec!["sh".into()],
+            started: Timestamp::now(),
+            socket: dir.join("sock"),
+            holder_pid: None,
+        },
+    )
+    .unwrap();
+    reads.again(&mut app);
+    assert!(reads.task.is_some(), "one more, for what was asked meanwhile");
+    let (at, rows) = reads.next().await.expect("read");
+    assert!(app.read_done(at, rows));
+    assert!(app.rows.iter().any(|r| r.key == "r:late-sh"));
+    reads.again(&mut app);
+    assert!(reads.task.is_none(), "and no more");
+}

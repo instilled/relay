@@ -72,7 +72,9 @@ pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Bac
         .await?;
     out.flush().await?;
     let size = crossterm::terminal::size().unwrap_or((80, 24));
+    let spawning = crate::trace::span("attach.spawn");
     let spawned = start(argv, cwd, size)?;
+    drop(spawning);
 
     let (keys_tx, keys) = mpsc::channel::<Vec<u8>>(64);
     let stop_keys = keys_tx.clone();
@@ -109,6 +111,7 @@ pub async fn hold(argv: &[String], cwd: Option<&Path>, name: &str) -> Result<Bac
     }));
     let mut alt = AltScreen::default();
     let back = pass(spawned, keys, sizes, &mut out, &mut alt).await;
+    crate::trace::end("return.hangup");
     // However it went, the terminal is handed back: what it had on when it
     // was let go of was never turned off by it, keyboard protocols too.
     let _ = out.write_all(&alt.leave()).await;
@@ -142,7 +145,11 @@ pub async fn pass(
     out: &mut (impl AsyncWrite + Unpin),
     alt: &mut AltScreen,
 ) -> Result<Back> {
-    match through(&mut sp, keys, sizes, out, alt).await {
+    let went = through(&mut sp, keys, sizes, out, alt).await;
+    crate::trace::begin("return.native");
+    crate::trace::begin("return.handback");
+    crate::trace::begin("return.hangup");
+    match went {
         Went::Ended(exit) => Ok(Back::Ended(exit)),
         Went::Detached => {
             hang_up(sp.pid, &mut sp.exit).await;
@@ -172,6 +179,7 @@ async fn through(
                     if let Err(e) = write(out, &b).await {
                         return Went::Failed(e.into());
                     }
+                    crate::trace::end("attach.native");
                 }
                 // Its pty closed: it has ended, or is about to. One that
                 // goes on without its terminal is not waited for.
