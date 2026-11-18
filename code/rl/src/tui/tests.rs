@@ -2691,18 +2691,28 @@ async fn a_conversation_carried_on_from_another_terminal_takes_what_you_kept_for
 #[test]
 fn the_settle_counts_from_when_our_modes_were_set() {
     use std::time::{Duration, Instant};
-    // The first frame took most of it already: only the rest is waited.
+    // The first frame took most of it already: only the rest is left. (What
+    // is left, not how long a sleep took: a loaded machine oversleeps.)
     let late = super::Settling {
         since: Instant::now() - Duration::from_millis(50),
     };
-    let at = Instant::now();
-    late.wait();
-    assert!(at.elapsed() < Duration::from_millis(40), "{:?}", at.elapsed());
-    // Just set: the whole of it, so what was on its way still comes first.
+    assert!(late.left() <= Duration::from_millis(10), "{:?}", late.left());
+    // Past it: nothing left.
+    let past = super::Settling {
+        since: Instant::now() - super::SETTLE * 2,
+    };
+    assert_eq!(past.left(), Duration::ZERO);
+    // Just set: the whole of it, so what was on its way still comes first —
+    // and a wait does wait it out (a sleep never ends early).
     let fresh = super::Settling { since: Instant::now() };
+    assert!(
+        fresh.left() > super::SETTLE - Duration::from_millis(5),
+        "{:?}",
+        fresh.left()
+    );
     let at = Instant::now();
     fresh.wait();
-    assert!(at.elapsed() >= super::SETTLE - Duration::from_millis(1));
+    assert!(at.elapsed() >= super::SETTLE - Duration::from_millis(5));
 }
 
 #[tokio::test]

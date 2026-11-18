@@ -548,7 +548,13 @@ impl Settling {
 
     /// Until `SETTLE` after our modes were set.
     fn wait(&self) {
-        std::thread::sleep(SETTLE.saturating_sub(self.since.elapsed()));
+        std::thread::sleep(self.left());
+    }
+
+    /// What is left of `SETTLE`: what was done since our modes were set
+    /// counts towards it.
+    fn left(&self) -> std::time::Duration {
+        SETTLE.saturating_sub(self.since.elapsed())
     }
 }
 
