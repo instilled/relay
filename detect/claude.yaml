@@ -77,6 +77,10 @@ sessions:
   # passes --discard-unpushed or --force-remove-worktree. Read off `claude rm
   # --help` 2.1.322.
   remove: [rm, "{id}"]
+  # Space on one in Claude's background peeks at it from the list: `claude
+  # logs <id>` prints its recent terminal output, and the list shows the
+  # last lines of it. Nothing is sent to it.
+  logs: [logs, "{id}"]
   # No rename from outside: a name you give one in Relay's list is Relay's
   # till Relay next starts it or carries it on, which passes `name` above.
   # Relay mail wakes one idle in its background by `stop`, then `resume`

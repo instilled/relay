@@ -156,7 +156,15 @@ while True:
         t = by_id[p["threadId"]]
         t["preview"] = t["preview"] or p["input"][0]["text"]
         t["status"] = {"type": "active", "activeFlags": []}
-        t["turns"].append({"id": "turn-%d" % (len(t["turns"]) + 1), "status": "inProgress"})
+        # What a turn holds once under way: the prompt, a command it ran,
+        # what it says.
+        text = p["input"][0]["text"]
+        items = [
+            {"type": "userMessage", "id": "i1", "content": [{"type": "text", "text": text}]},
+            {"type": "commandExecution", "id": "i2", "command": "make test", "status": "completed"},
+            {"type": "agentMessage", "id": "i3", "text": "Working on: %s\nthe tests pass" % text},
+        ]
+        t["turns"].append({"id": "turn-%d" % (len(t["turns"]) + 1), "status": "inProgress", "items": items})
         result = {"turn": t["turns"][-1]}
     elif method == "turn/interrupt":
         t = by_id[p["threadId"]]

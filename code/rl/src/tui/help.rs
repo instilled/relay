@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Id {
     Enter,
+    Peek,
     Detach,
     Start,
     Find,
@@ -51,8 +52,9 @@ const fn key(id: Id, keys: &'static str, does: &'static str) -> Key {
 
 /// Every key the list has, the ones used most first; the grid fills its
 /// rows in this order.
-pub const KEYS: [Key; 23] = [
+pub const KEYS: [Key; 24] = [
     key(Id::Enter, "enter", "to attach"),
+    key(Id::Peek, "space", "to peek"),
     key(Id::Detach, "ctrl+\\", "to detach"),
     key(Id::Find, "ctrl+f", "to find"),
     key(Id::Commands, "/", "for commands"),
