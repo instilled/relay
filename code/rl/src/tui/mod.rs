@@ -383,6 +383,17 @@ impl App {
     }
 
     fn event(&mut self, e: Event) {
+        if trace::on() {
+            match &e {
+                Event::Key(k) => trace::note(format_args!("key {:?} {:?} {:?}", k.code, k.modifiers, k.kind)),
+                Event::Mouse(m) => trace::note(format_args!(
+                    "mouse {:?} {},{} {:?}",
+                    m.kind, m.column, m.row, m.modifiers
+                )),
+                Event::Paste(s) => trace::note(format_args!("paste {} bytes", s.len())),
+                other => trace::note(format_args!("event {other:?}")),
+            }
+        }
         match e {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(input::typed(k)),
             Event::Mouse(m) => self.mouse(m),
@@ -493,6 +504,7 @@ fn kitty_supported() -> bool {
 /// `Settling::done` drops what came in the handover before the input is
 /// read.
 fn take_screen() -> (ratatui::DefaultTerminal, Settling) {
+    trace::note(format_args!("screen.taken"));
     let _ = write!(std::io::stdout(), "{SYNC_ON}");
     // Coming back from a session, the screen is whatever it left: a
     // full-screen agent keeps its own alternate screen, its scroll region and
@@ -555,6 +567,7 @@ impl Settling {
     fn done(self) {
         self.wait();
         input::discard_pending(std::io::stdin());
+        trace::note(format_args!("screen.settled"));
     }
 
     /// Until `SETTLE` after our modes were set.
