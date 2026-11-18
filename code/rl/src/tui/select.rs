@@ -22,6 +22,38 @@ impl App {
         self.sel = first;
     }
 
+    /// Where the cursor goes once the line it is on has left, best first:
+    /// the next row of the same project, else the one before it there, else
+    /// the project's header; only then the line after, else the one before.
+    /// So removing a project's last row leaves the cursor in that project.
+    pub fn near_keys(&self) -> Vec<String> {
+        let lines = self.lines();
+        let Some(at) = self.sel.as_ref().and_then(|k| lines.iter().position(|l| l.key() == *k)) else {
+            return Vec::new();
+        };
+        let mut near = Vec::new();
+        if let Some(l) = lines[at + 1..].iter().take_while(|l| l.row().is_some()).next() {
+            near.push(l.key());
+        }
+        let before = lines[..at].iter().rev().take_while(|l| l.row().is_some());
+        if let Some(l) = before.clone().next() {
+            near.push(l.key());
+        }
+        if let Some(head) = lines[..at].iter().rev().find(|l| l.row().is_none()) {
+            near.push(head.key());
+        }
+        near.extend(lines.get(at + 1).map(Line::key));
+        near.extend(at.checked_sub(1).and_then(|i| lines.get(i)).map(Line::key));
+        near
+    }
+
+    /// The cursor on the first of `near` still on the list, else settled.
+    pub fn select_near(&mut self, near: &[String]) {
+        let keys = self.keys();
+        self.sel = near.iter().find(|k| keys.contains(k)).cloned();
+        self.settle();
+    }
+
     pub fn select(&mut self, key: Option<String>) {
         self.sel = key;
     }

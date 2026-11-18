@@ -426,7 +426,7 @@ impl App {
         }
         let mut first = vec![
             Span::styled(NAME, theme::accent().add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), theme::dim()),
+            Span::styled(format!(" {}", env!("RL_VERSION")), theme::dim()),
         ];
         let user = std::env::var_os("HOME");
         if let Some(home) = home_note(self.home.path(), user.as_deref().map(Path::new)) {

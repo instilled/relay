@@ -365,7 +365,7 @@ impl App {
     /// `config.json`: its name, its place among the projects and its hide
     /// go with it.
     pub(super) fn forget_project(&mut self, key: String, folder: PathBuf, title: String) {
-        let next = self.next_key();
+        let near = self.near_keys();
         self.change_prefs(|p| {
             p.projects.retain(|f| Path::new(f) != folder);
             p.names.remove(&key);
@@ -377,8 +377,7 @@ impl App {
         });
         self.say(format!("took {title} off the list · /project adds it again"));
         if !self.keys().contains(&key) {
-            self.select(next);
-            self.settle();
+            self.select_near(&near);
         }
     }
 

@@ -345,6 +345,9 @@ impl App {
         if d.ask_native {
             self.ask_native = true;
         }
+        if !d.near.is_empty() && self.selected().is_none() && matches!(self.mode, Mode::List) {
+            self.select_near(&d.near);
+        }
         if let Some(k) = d.select {
             if self.keys().contains(&k) {
                 if matches!(self.mode, Mode::List) {
@@ -434,13 +437,13 @@ impl App {
                 // later by the same name is a new one. One still going is
                 // stopped first, by its harness.
                 let a = sources::harness_of(&session.harness);
-                let next = self.next_key();
+                let near = self.near_keys();
                 self.say(format!("removing {title}…"));
                 self.work.spawn(async move {
                     let run = tokio::task::spawn_blocking(move || a.remove(&session)).await;
                     match run {
                         Ok(Ok(())) => Done {
-                            select: next,
+                            near,
                             forget: Some(key),
                             ask_native: true,
                             ..Done::said(format!("removed {title}"))
@@ -452,7 +455,7 @@ impl App {
                 });
             }
             Removal::Hide { key, title } => {
-                let next = self.next_key();
+                let near = self.near_keys();
                 let at = Timestamp::now();
                 self.change_prefs(|p| {
                     p.hidden.retain(|h| h.key != key);
@@ -460,8 +463,7 @@ impl App {
                 });
                 self.say(format!("hid {title} · ctrl+o shows the hidden"));
                 if !self.keys().contains(&key) {
-                    self.select(next);
-                    self.settle();
+                    self.select_near(&near);
                 }
             }
             Removal::Unhide { key, title } => {
@@ -503,16 +505,6 @@ impl App {
             self.mode = Mode::List;
             self.remove(plan);
         }
-    }
-
-    /// The line after the cursor, else the one before: where it goes once
-    /// its own line has left.
-    pub(super) fn next_key(&self) -> Option<String> {
-        let keys = self.keys();
-        let at = keys.iter().position(|k| Some(k) == self.sel.as_ref())?;
-        keys.get(at + 1)
-            .or_else(|| at.checked_sub(1).and_then(|i| keys.get(i)))
-            .cloned()
     }
 
     /// `^r` (or `/rename` with no name, `by`): a name of yours for a session

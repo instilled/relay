@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// list.
 /// `rl --version`: the crate's version and the commit it was built from
 /// (`build.rs`), for bug reports.
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RL_GIT_COMMIT"), ")");
+const VERSION: &str = env!("RL_VERSION");
 
 #[derive(Parser)]
 #[command(name = "rl", version = VERSION)]

@@ -9,7 +9,9 @@ members = [
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.0"
+# A placeholder Cargo needs: releases are named by date (`2026.11-17`,
+# rl_core::RELEASE), set at build time by the release workflow.
+version = "0.0.0"
 edition = "2024"
 # The oldest Rust relay is built and checked with (`scripts/install` reads
 # it); CI runs the latest stable.
