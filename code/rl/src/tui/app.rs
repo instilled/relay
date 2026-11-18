@@ -83,6 +83,9 @@ pub struct Done {
     pub said: String,
     /// The line the cursor goes to, once it is there.
     pub select: Option<String>,
+    /// Where the cursor goes once its own line has left: the first of these
+    /// still on the list (`App::near_keys`).
+    pub near: Vec<String>,
     /// A row gone for good, whose name, pin, hide and place go with it.
     pub forget: Option<String>,
     /// What the terminal goes to now: a conversation carried on.
@@ -115,6 +118,7 @@ impl Done {
         Done {
             said: s.into(),
             select: None,
+            near: Vec::new(),
             forget: None,
             hand: None,
             gave_up: false,

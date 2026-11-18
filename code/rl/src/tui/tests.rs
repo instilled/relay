@@ -2461,6 +2461,33 @@ fn beside(f: &Fixture, name: &str) -> PathBuf {
 }
 
 #[tokio::test]
+async fn hiding_a_projects_last_row_keeps_the_cursor_in_that_project() {
+    let f = fixture();
+    let yard = beside(&f, "yard");
+    let mut app = list(&f).await;
+    app.set_native(vec![
+        waiting(&f.repo),
+        NativeRow {
+            id: "ef56ab78".into(),
+            name: "paint the fence".into(),
+            ..waiting(&yard)
+        },
+    ]);
+    app.reload();
+    let shop = format!("g:{}", f.repo.display());
+    let yard_head = format!("g:{}", yard.display());
+    assert_eq!(
+        app.keys(),
+        [shop.as_str(), HELD, NATIVE, yard_head.as_str(), "n:claude:ef56ab78"]
+    );
+    // The last row of shop: the cursor goes up to the one before it, not on
+    // to yard.
+    on(&mut app, NATIVE);
+    run(&mut app, "/hide");
+    assert_eq!(app.sel.as_deref(), Some(HELD));
+}
+
+#[tokio::test]
 async fn a_line_typed_on_a_session_in_a_worktree_starts_in_its_project_root() {
     let f = fixture();
     let tree = f.repo.join(".claude/worktrees/login");
