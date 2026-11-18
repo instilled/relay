@@ -64,6 +64,11 @@ Folders are the truth: liveness is read from files and sockets; every write is `
   the start, key → frame, reads, attach and return. Off, it costs nothing.
 - **Actions.** Stop, remove and rename are whatever `Harness::actions` offers; a refusal's stderr
   stands in the footer and the row stays. A name a harness can't take stays Relay's.
+- **Peek** (`tui/peek.rs`). `space` opens a pane under the list on the session under the cursor:
+  its name, harness and state, then its last lines as `Harness::peek` gives them. Asked on a
+  blocking thread once the cursor has rested on a row (150 ms), again every 1.5 s while it stays;
+  an answer for a row the cursor has left is dropped, so a slow harness never holds up a key.
+  Read only: nothing is sent to the session. `space` or `esc` shuts it.
 
 ## Harnesses
 
@@ -81,7 +86,7 @@ harness version can turn a feature off (noticed as drift) but never misfire.
 | `hooks`, `sessions.hooks` | the hook dialect, the events and the settings file Relay writes them to |
 | `patterns`, `timing` | regexes over a held session's screen (its state only) |
 | `sessions.list` | the listing and its `reader` (`claude-agents`, `codex-threads`) |
-| `sessions.attach` `start` `stop` `remove` `ping` `rename` | argv or RPC for each, with `{id}`, `{name}`, `{text}` |
+| `sessions.attach` `start` `stop` `remove` `ping` `logs` `rename` | argv or RPC for each, with `{id}`, `{name}`, `{text}` |
 | `mcp`, `settings` | where the `relay` MCP server is registered; global keys setup sets |
 
 A profile alone adds a harness that uses integration Relay already has (held sessions, a hook dialect,
@@ -101,6 +106,7 @@ pub trait Harness: Send + Sync {
     fn remove(&self, s: &Session) -> Result<()>;
     fn rename(&self, s: &Session, name: &str) -> Renamed;
     fn notify(&self, s: &Session, mail: &Mail) -> Notified;
+    fn peek(&self, s: &Session, rows: usize) -> Peek;  // Lines(text, newest last) | Nothing(why)
     fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<setup::Part>>;
     fn caller(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<String>;
     fn check(&self) -> Compat;
@@ -115,6 +121,10 @@ pub trait Harness: Send + Sync {
 | stop / remove | `claude stop` / `claude rm` | `turn/interrupt` / `thread/delete` | close the holder / remove its folder |
 | rename | at its next start (`-n`) | `thread/name/set` | Relay's only |
 | mail | woken: `claude stop`, then `--resume <session> --bg "<line>"`; busy: its hooks | `codex queue` | its ping, else at the next `inbox` |
+| peek | `claude logs <id>`, read back on a 300×100 screen | `thread/read` with its turns, in words (`›` prompt, `$` command, `~` file); never starts the daemon | the holder's screen (attach for the screen, read to `ReplayEnd`, hang up: no input, no resize) |
+
+One open in another terminal is peeked at only where it is a thread on Codex's daemon; elsewhere the
+pane says it runs there: Relay reads no other terminal's screen.
 
 Codex is never held: JSON-RPC over a WebSocket to `codex app-server proxy`, starting the daemon if
 none runs. Waking a Claude starts a new session on the same conversation; Relay carries the row

@@ -10,12 +10,13 @@
 //!
 //! What the profile's `sessions:` block says is how it is run: `list`,
 //! `attach` (`claude attach <id>`), `start` (`claude --bg`), `name` (`-n
-//! <name>`), and the profile's `resume` for carrying one on (`claude
-//! --resume <session> --bg`).
+//! <name>`), `logs` (`claude logs <id>`, what a peek at one shows), and the
+//! profile's `resume` for carrying one on (`claude --resume <session>
+//! --bg`).
 
 use crate::harness::{
-    self, Actions, Attach, Compat, Forked, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, Pr, RenameHow,
-    Renamed, Session, Start, Started, held,
+    self, Actions, Attach, Compat, Forked, Harness, Info, Mail, NativeRow, NativeState, Notified, Owner, Peek, Pr,
+    RenameHow, Renamed, Session, Start, Started, held,
 };
 use crate::mcp_entry::How;
 use crate::registry::{PROMPT, Profile, SESSION};
@@ -301,6 +302,15 @@ impl Harness for Claude {
                 s.name
             )),
             Err(why) => Notified::Failed(why),
+        }
+    }
+
+    /// One in its background: what it printed last, as `claude logs <id>`
+    /// prints it. Held: its holder's screen; elsewhere: nothing.
+    fn peek(&self, s: &Session, rows: usize) -> Peek {
+        match s.owner {
+            Owner::Own => harness::logs_peek(&self.profile, &self.bin, &s.id, &s.cwd, rows),
+            _ => held::peek(s, rows),
         }
     }
 

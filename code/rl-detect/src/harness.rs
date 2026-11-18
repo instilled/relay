@@ -182,6 +182,27 @@ pub(crate) fn remove_id(p: &Profile, bin: &str, id: &str, cwd: &Path) -> Result<
     run(&argv, Some(cwd), false, LIST_WAIT).map(drop).map_err(said)
 }
 
+/// What its session `id` printed last, in `cwd`: its profile's
+/// `sessions.logs` arguments run with `bin` (`claude logs <id>`), the bytes
+/// read back on a terminal of their own (`PEEK_COLS` by `PEEK_ROWS`) and its
+/// last `rows` lines kept. Where it refuses, what it said, as it said it.
+pub(crate) fn logs_peek(p: &Profile, bin: &str, id: &str, cwd: &Path, rows: usize) -> Peek {
+    let Some(s) = p.sessions.as_ref().filter(|s| !s.logs.is_empty()) else {
+        return Peek::Nothing(format!("nothing shows a {} session from here", p.name));
+    };
+    let argv: Vec<String> = std::iter::once(bin.to_string())
+        .chain(s.logs.iter().map(|a| a.replace(ID, id)))
+        .collect();
+    let cwd = Some(cwd).filter(|d| d.is_dir());
+    match run(&argv, cwd, true, PEEK_WAIT) {
+        Ok(out) => Peek::last(
+            rl_session::screen::Screen::text_of(out.as_bytes(), PEEK_COLS, PEEK_ROWS),
+            rows,
+        ),
+        Err(e) => Peek::Nothing(format!("{:#}", said(e))),
+    }
+}
+
 // ---- The intents ---------------------------------------------------------
 
 /// What a harness is, for the list and `rl doctor`.
@@ -456,6 +477,44 @@ impl Notified {
     }
 }
 
+/// What a peek at a session shows (`Harness::peek`): read only, nothing sent
+/// to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Peek {
+    /// What it is doing, as plain text — no escapes — oldest first, its
+    /// newest line last.
+    Lines(Vec<String>),
+    /// Nothing to show from here, and why.
+    Nothing(String),
+}
+
+impl Peek {
+    /// The last `rows` of `lines`, the empty ones at either end left off.
+    pub fn last(lines: Vec<String>, rows: usize) -> Peek {
+        let end = lines.iter().rposition(|l| !l.trim().is_empty()).map_or(0, |i| i + 1);
+        let mut lines = lines;
+        lines.truncate(end);
+        let from = lines.len().saturating_sub(rows.max(1));
+        let mut kept: Vec<String> = lines.split_off(from);
+        while kept.first().is_some_and(|l| l.trim().is_empty()) {
+            kept.remove(0);
+        }
+        Peek::Lines(kept)
+    }
+}
+
+/// How long a peek may take: the list asks again every second or two.
+pub const PEEK_WAIT: Duration = Duration::from_secs(5);
+
+/// The size of the terminal a harness's own output is read back on
+/// (`claude logs`): wider and taller than its own, so nothing it drew wraps
+/// or is cut that it did not wrap or cut itself.
+pub const PEEK_COLS: u16 = 300;
+pub const PEEK_ROWS: u16 = 100;
+
+/// What a peek says of one open in a terminal of its own.
+pub const ELSEWHERE: &str = "it runs in another terminal: nothing of it to show here";
+
 /// How a harness stands against what Relay uses of it (`Harness::check`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Compat {
@@ -474,6 +533,10 @@ pub trait Holder: Send + Sync {
     /// Removes the held session `name`, kept in `dir`, ended, and all Relay
     /// kept of it.
     fn remove(&self, dir: &Path, name: &str) -> Result<()>;
+    /// What the held session `name`, kept in `dir`, shows on its screen
+    /// now, as text: its last `rows` lines, the newest last. Read only:
+    /// nothing is sent to it, no size, no input.
+    fn screen(&self, dir: &Path, name: &str, rows: usize) -> Result<Vec<String>>;
 }
 
 static HOLDER: std::sync::RwLock<Option<std::sync::Arc<dyn Holder>>> = std::sync::RwLock::new(None);
@@ -493,8 +556,9 @@ fn holder() -> Result<std::sync::Arc<dyn Holder>> {
 
 /// Everything Relay does with one harness, as intents: each harness binds
 /// its own steps behind them, and a caller shows what came of one.
-/// `sessions`, `start`, `stop`, `remove`, `rename`, `notify` and `check`
-/// may run the harness and block; they are asked from a background task.
+/// `sessions`, `start`, `stop`, `remove`, `rename`, `notify`, `peek` and
+/// `check` may run the harness and block; they are asked from a background
+/// task.
 pub trait Harness: Send + Sync {
     fn info(&self) -> &Info;
     /// Its own sessions, for no longer than `wait`: none for one Relay
@@ -514,6 +578,9 @@ pub trait Harness: Send + Sync {
     fn rename(&self, s: &Session, name: &str) -> Renamed;
     /// Tells `s` it has `mail`.
     fn notify(&self, s: &Session, mail: &Mail) -> Notified;
+    /// What `s` is doing, read without attaching: at most its last `rows`
+    /// lines. Nothing is sent to it.
+    fn peek(&self, s: &Session, rows: usize) -> Peek;
     /// What `rl setup` does for it, part by part, each in its file as `env`
     /// finds it. An error where one's file is not known (`HOME` not set).
     fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>>;
@@ -590,6 +657,19 @@ pub(crate) mod held {
                 h.remove(dir, &s.id)
             }
             _ => bail!("nothing removes a {} session from here", s.harness),
+        }
+    }
+
+    /// A held one: its holder's screen as it is now. One elsewhere: nothing
+    /// — Relay never reads another terminal's screen.
+    pub fn peek(s: &Session, rows: usize) -> Peek {
+        match &s.owner {
+            Owner::Relay { dir, .. } => match holder().and_then(|h| h.screen(dir, &s.id, rows)) {
+                Ok(lines) => Peek::last(lines, rows),
+                Err(e) => Peek::Nothing(format!("{e:#}")),
+            },
+            Owner::Elsewhere { .. } => Peek::Nothing(ELSEWHERE.into()),
+            Owner::Own => Peek::Nothing(format!("nothing shows a {} session from here", s.harness)),
         }
     }
 
@@ -672,6 +752,10 @@ impl Harness for Held {
 
     fn notify(&self, s: &Session, mail: &Mail) -> Notified {
         held::notify(&self.profile, &self.info.bin, s, mail)
+    }
+
+    fn peek(&self, s: &Session, rows: usize) -> Peek {
+        held::peek(s, rows)
     }
 
     fn setup(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Result<Vec<crate::setup::Part>> {
@@ -1175,6 +1259,15 @@ mod tests {
             self.0.lock().unwrap().push(format!("remove {name}"));
             Ok(())
         }
+        fn screen(&self, _: &Path, name: &str, rows: usize) -> Result<Vec<String>> {
+            self.0.lock().unwrap().push(format!("screen {name} {rows}"));
+            Ok(vec![
+                String::new(),
+                format!("{name} $ make"),
+                "ok".into(),
+                String::new(),
+            ])
+        }
     }
 
     #[test]
@@ -1261,6 +1354,17 @@ mod tests {
                 "remove api-gemini"
             ],
             "a live one stopped before it is removed"
+        );
+        assert_eq!(
+            gemini.peek(&held, 2),
+            Peek::Lines(vec!["api-gemini $ make".into(), "ok".into()]),
+            "its holder's screen, its last lines, blank ends left off"
+        );
+        assert_eq!(kept.0.lock().unwrap().pop().as_deref(), Some("screen api-gemini 2"));
+        assert_eq!(
+            gemini.peek(&elsewhere, 5),
+            Peek::Nothing(ELSEWHERE.into()),
+            "no screen read"
         );
         assert!(Harness::stop(gemini.as_ref(), &elsewhere).is_err());
         assert_eq!(Harness::rename(gemini.as_ref(), &held, "x"), Renamed::RelayOnly(None));
@@ -1474,6 +1578,76 @@ mod tests {
     }
 
     #[test]
+    fn a_peek_at_one_of_claudes_own_is_what_claude_logs_prints_as_a_terminal_shows_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let bin = dir.join("claude");
+        // As `claude logs` prints it: a terminal's bytes, no newlines — a
+        // line ends in a carriage return and a move down — styled, and a
+        // line drawn over in place. One it does not have, it says so.
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = logs ] || exit 9\nprintf '%s\\n' \"$PWD\" > said\n\
+             [ \"$2\" = ab12cd34 ] || { echo \"Couldn't read logs for $2 — session not found\" >&2; exit 1; }\n\
+             printf '\\033[2J\\033[H\\033[1m⏺ Reading\\033[m the tests\\r\\033[1B  ⎿ 12 files\\r\\033[1B\\033[38;2;1;2;3mdraft\\033[m\\r\\033[2Kdone · 3 passed\\r\\033[1B'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = of(Registry::builtin().profile("claude").unwrap(), Some(bin));
+        let own = session("claude", Owner::Own, RunState::Working, &dir);
+        assert_eq!(
+            c.peek(&own, 10),
+            Peek::Lines(vec![
+                "⏺ Reading the tests".into(),
+                "  ⎿ 12 files".into(),
+                "done · 3 passed".into()
+            ])
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("said")).unwrap().trim(),
+            dir.display().to_string(),
+            "run in its folder"
+        );
+        assert_eq!(
+            c.peek(&own, 1),
+            Peek::Lines(vec!["done · 3 passed".into()]),
+            "the newest last"
+        );
+        let gone = Session {
+            id: "ffff0000".into(),
+            ..own.clone()
+        };
+        assert_eq!(
+            c.peek(&gone, 10),
+            Peek::Nothing("Couldn't read logs for ffff0000 — session not found".into()),
+            "as Claude said it"
+        );
+        let elsewhere = session(
+            "claude",
+            Owner::Elsewhere {
+                listed: true,
+                open: true,
+            },
+            RunState::Working,
+            &dir,
+        );
+        assert_eq!(c.peek(&elsewhere, 10), Peek::Nothing(ELSEWHERE.into()));
+    }
+
+    #[test]
+    fn a_peeks_lines_are_the_last_that_say_something() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            Peek::last(l(&["a", "", "b", "c", " ", ""]), 3),
+            Peek::Lines(l(&["b", "c"]))
+        );
+        assert_eq!(Peek::last(l(&["a", "", "b"]), 2), Peek::Lines(l(&["b"])));
+        assert_eq!(Peek::last(l(&["", " "]), 5), Peek::Lines(Vec::new()));
+        assert_eq!(Peek::last(l(&["a", "b"]), 0), Peek::Lines(l(&["b"])), "at least one");
+    }
+
+    #[test]
     fn claude_carries_a_conversation_on_named_with_dash_n() {
         let r = Registry::builtin();
         let c = crate::claude_native::Claude::of(r.profile("claude").unwrap(), "claude".into()).unwrap();
@@ -1507,6 +1681,64 @@ mod tests {
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
+    }
+
+    #[test]
+    fn a_peek_at_a_codex_thread_is_its_turns_in_words_off_the_daemon_and_starts_no_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let (c, bin) = stand_in_codex(&dir);
+        let start = Start {
+            cwd: dir.clone(),
+            prompt: Some("fix the login".into()),
+            ..Start::default()
+        };
+        let Started::Background(id) = Harness::start(c.as_ref(), &start).unwrap() else {
+            panic!("a thread on its daemon");
+        };
+        let own = Session {
+            id: id.clone(),
+            session_id: id.clone(),
+            ..session("codex", Owner::Own, RunState::Working, &dir)
+        };
+        let before = sent(&bin).len();
+        assert_eq!(
+            c.peek(&own, 10),
+            Peek::Lines(vec![
+                "› fix the login".into(),
+                "$ make test".into(),
+                "Working on: fix the login".into(),
+                "the tests pass".into(),
+            ])
+        );
+        let asked: Vec<serde_json::Value> = sent(&bin)[before..]
+            .iter()
+            .filter(|m| m["method"] != "initialize" && m["method"] != "initialized")
+            .cloned()
+            .collect();
+        assert_eq!(asked.len(), 1, "read only: {asked:?}");
+        assert_eq!(
+            (asked[0]["method"].as_str(), &asked[0]["params"]),
+            (
+                Some("thread/read"),
+                &serde_json::json!({"threadId": id, "includeTurns": true})
+            )
+        );
+        assert_eq!(c.peek(&own, 1), Peek::Lines(vec!["the tests pass".into()]));
+        let gone = Session {
+            id: "019f0000-dead".into(),
+            ..own.clone()
+        };
+        let Peek::Nothing(why) = c.peek(&gone, 10) else {
+            panic!("no such thread");
+        };
+        assert!(why.contains("thread not found"), "{why}");
+        std::fs::write(bin.with_extension("down"), "").unwrap();
+        assert_eq!(c.peek(&own, 10), Peek::Nothing("codex's daemon is not running".into()));
+        assert!(
+            !sent(&bin).iter().any(|m| m["run"] == "daemon start"),
+            "a peek starts no daemon"
+        );
     }
 
     #[test]

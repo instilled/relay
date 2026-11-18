@@ -374,7 +374,13 @@ impl App {
         for sep in a.seps {
             f.render_widget(Paragraph::new("─".repeat(sep.width as usize)).dim(), sep);
         }
-        self.draw_list(f, a.list, &lines);
+        // The peek pane, while it is open on a session, under the list.
+        let pane = self.peek_rows(a.list.height);
+        let [list, peek] = Layout::vertical([Constraint::Fill(1), Constraint::Length(pane)]).areas(a.list);
+        self.draw_list(f, list, &lines);
+        if pane > 0 {
+            self.draw_peek(f, peek);
+        }
         f.render_widget(Paragraph::new(self.bottom_lines(a.line.width)), a.line);
         let footer = Rect {
             x: a.footer.x + TEXT_INDENT,
@@ -637,6 +643,13 @@ impl App {
             help::hint(help::Id::Find, None),
             help::hint(help::Id::Commands, None),
         ];
+        // `space` where it does something: on a session, or to shut the pane.
+        match (self.peek.is_some(), self.peek_row().is_some()) {
+            (true, true) => hints.insert(1, help::hint(help::Id::Peek, Some("to close the peek"))),
+            (true, false) => hints.insert(0, "the peek shows a session: put the cursor on one".into()),
+            (false, true) => hints.insert(1, help::hint(help::Id::Peek, None)),
+            (false, false) => {}
+        }
         if !self.filter.is_empty() {
             hints.insert(1, "esc to clear the search".into());
         }

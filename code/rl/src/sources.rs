@@ -272,6 +272,10 @@ impl Harness for StandIn {
         self.inner.notify(s, mail)
     }
 
+    fn peek(&self, s: &rl_detect::harness::Session, rows: usize) -> rl_detect::harness::Peek {
+        self.inner.peek(s, rows)
+    }
+
     fn setup(&self, env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> anyhow::Result<Vec<rl_detect::setup::Part>> {
         self.inner.setup(env)
     }

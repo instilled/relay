@@ -216,6 +216,14 @@ pub struct App {
     pub drift: RefCell<(Option<std::time::SystemTime>, Option<String>)>,
     /// The line under the cursor, by key.
     pub sel: Option<String>,
+    /// When the cursor last moved: a peek waits for it to settle.
+    pub moved: Instant,
+    /// `space`: the peek pane, while it is open (`peek`).
+    pub peek: Option<super::peek::Peeking>,
+    /// Peeks under way, each on a blocking thread of its own.
+    pub peeks: JoinSet<super::peek::Peeked>,
+    /// How many lines the peek pane showed, as last drawn.
+    pub peek_h: Cell<u16>,
     /// Where the list's window starts, as last drawn.
     pub scroll: Cell<usize>,
     /// Where the list last drew, for the mouse.
@@ -266,6 +274,10 @@ impl App {
             reporting: false,
             drift: RefCell::default(),
             sel: None,
+            moved: Instant::now(),
+            peek: None,
+            peeks: JoinSet::new(),
+            peek_h: Cell::new(0),
             scroll: Cell::new(0),
             hit: RefCell::default(),
             list_h: Cell::new(0),

@@ -130,6 +130,10 @@ nothing running in it yet; the cursor lands on it, so typing starts something th
 their own, their own detach or quit brings you back). A session Relay holds lives in a small process of its own
 (`rl-session`), so closing the terminal or the laptop costs nothing.
 
+`space` peeks without attaching: a pane under the list shows what the session under the cursor is
+doing (Claude's `claude logs`, a Codex thread's last turns, a held session's screen) and follows the
+cursor as you move; nothing is sent to it. `space` or `esc` shuts it.
+
 Feels slow? `RL_TRACE=1 rl` writes how long each step took (start, key → frame, attach, return) to
 `~/.relay/trace.log`.
 
@@ -152,13 +156,14 @@ several lines, and a paste keeps its newlines.
 ### Keys
 
 `ctrl+h` (or `f1`) shows them all as a grid under the command line. Every letter types; the list's
-own keys are ctrl keys, the arrows and `enter`.
+own keys are ctrl keys, the arrows, `enter` and `space`.
 
 ![Every key, as a grid under the command line](docs/img/help.svg)
 
 | key | does |
 | --- | --- |
 | `enter` | attach; with text typed, start it |
+| `space` | peek at the session under the cursor without attaching; again, or `esc`, shuts it |
 | `ctrl+\` | detach, back to the list |
 | `shift+enter` `alt+enter` `ctrl+j` | a new line in what is typed (`ctrl+j` for terminals that send `shift+enter` as `enter`; on an empty line it moves) |
 | `tab` | complete; again cycles |

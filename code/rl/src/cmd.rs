@@ -123,6 +123,35 @@ impl rl_detect::harness::Holder for Store {
         let home = home_of(dir)?;
         block(async move { rm(&home, name).await })
     }
+
+    fn screen(&self, dir: &Path, name: &str, rows: usize) -> Result<Vec<String>> {
+        let meta = sessions::read_meta(dir).with_context(|| format!("{name} is not one of Relay's sessions"))?;
+        let lines = block(async move { tokio::time::timeout(SCREEN_WAIT, screen(&meta.socket)).await? })
+            .with_context(|| format!("{name} is not answering"))?;
+        let from = lines.len().saturating_sub(rows);
+        Ok(lines[from..].to_vec())
+    }
+}
+
+/// How long a held session's holder has to hand over its screen.
+const SCREEN_WAIT: Duration = Duration::from_secs(3);
+
+/// The screen of the holder at `socket`, as text (`Screen::lines`): it is
+/// asked for its screen drawn afresh, which is read to its end and drawn on
+/// a screen of the holder's size; then the connection goes. Nothing is sent
+/// after the attach — no size, no input — so the session is as it was.
+async fn screen(socket: &Path) -> Result<Vec<String>> {
+    use rl_session::proto::Frame;
+    let (hello, mut session) = Session::attach_screen(socket).await?;
+    let mut drawn = rl_session::screen::Screen::new(hello.cols, hello.rows);
+    loop {
+        match session.recv().await? {
+            Some(Frame::Output(bytes)) => drawn.feed(&bytes),
+            Some(Frame::ReplayEnd) | None => break,
+            Some(_) => {}
+        }
+    }
+    Ok(drawn.lines())
 }
 
 /// The Relay home a session's folder is in.

@@ -277,6 +277,38 @@ impl Screen {
         out
     }
 
+    /// What it shows, as plain text: the history above, then the screen, a
+    /// line a row, oldest first — trailing blanks left off each, and the
+    /// empty rows under the last that says anything. No escapes at all: a
+    /// peek at the run draws these as text.
+    pub fn lines(&mut self) -> Vec<String> {
+        let (rows, cols) = self.parser.screen().size();
+        let screen = self.parser.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let mut at = screen.scrollback();
+        let mut out = Vec::new();
+        while at > 0 {
+            screen.set_scrollback(at);
+            let take = at.min(rows as usize);
+            out.extend(screen.rows(0, cols).take(take).map(|r| r.trim_end().to_string()));
+            at -= take;
+        }
+        screen.set_scrollback(0);
+        out.extend(screen.rows(0, cols).map(|r| r.trim_end().to_string()));
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
+        out
+    }
+
+    /// The text `bytes` leave on a terminal `cols` by `rows` (`lines`): a
+    /// run's output, cursor moves and all, as a viewer would read it.
+    pub fn text_of(bytes: &[u8], cols: u16, rows: u16) -> Vec<String> {
+        let mut s = Self::new(cols, rows);
+        s.feed(bytes);
+        s.lines()
+    }
+
     /// An ended run's screen, from as much of its output as there is.
     pub fn render(bytes: &[u8], cols: u16, rows: u16) -> Vec<u8> {
         let mut s = Self::new(cols, rows);
@@ -442,6 +474,21 @@ mod tests {
         p.process(b"mine 1\r\nmine 2\r\nmine 3\r\n");
         p.process(&s.snapshot());
         assert_eq!(shown_parser(&mut p, 20, 4), ["mine 1", "mine 2", "mine 3", "abc"]);
+    }
+
+    #[test]
+    fn a_runs_text_is_its_history_then_its_screen_with_no_escapes() {
+        let mut bytes = Vec::new();
+        for i in 0..6 {
+            bytes.extend_from_slice(format!("\x1b[1mline {i}\x1b[m\r\n").as_bytes());
+        }
+        // Redrawn in place, as an inline agent does, and moved about.
+        bytes.extend_from_slice(b"\x1b[1A\x1b[2K\rlast\x1b[1B\x1b[5Gbelow\r\n\r\n");
+        assert_eq!(
+            Screen::text_of(&bytes, 20, 4),
+            ["line 0", "line 1", "line 2", "line 3", "line 4", "last", "    below"]
+        );
+        assert!(Screen::text_of(b"", 20, 4).is_empty(), "nothing said: no lines");
     }
 
     #[test]

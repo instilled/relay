@@ -55,6 +55,9 @@ impl App {
     }
 
     pub fn select(&mut self, key: Option<String>) {
+        if key != self.sel {
+            self.moved = std::time::Instant::now();
+        }
         self.sel = key;
     }
 

@@ -2793,3 +2793,166 @@ async fn reads_asked_for_while_one_runs_are_one_more_after_it() {
     reads.again(&mut app);
     assert!(reads.task.is_none(), "and no more");
 }
+
+// ---- space: the peek pane --------------------------------------------
+
+/// The peek pane as drawn at 100 by 30: its rule, then its lines, up to the
+/// rule over the command line. Empty where there is none.
+fn pane(app: &App) -> Vec<String> {
+    let rows = screen(app, 100, 30);
+    let rule = |r: &String| r.trim_end().chars().all(|c| c == '─');
+    let Some(at) = rows.iter().position(|r| r.starts_with("─ ") && !rule(r)) else {
+        return Vec::new();
+    };
+    rows[at..]
+        .iter()
+        .take_while(|r| !rule(r))
+        .map(|r| r.trim_end().to_string())
+        .collect()
+}
+
+/// Until the pane shows what the row under the cursor's harness said: each
+/// ask as the list's loop would make it, once it is due, and each answer
+/// taken as it comes. Answers for other rows may still be on their way.
+async fn peek_settles(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let here = app.peek_row().map(|r| r.key.clone()).expect("on a session");
+        if app.peek.as_ref().and_then(|p| p.shown.as_ref()).map(|(k, _)| k) == Some(&here) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "no peek came for {here}");
+        if let Some(at) = app.peek_due() {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+            app.ask_peek();
+        }
+        let next = tokio::time::timeout(std::time::Duration::from_millis(100), app.peeks.join_next()).await;
+        if let Ok(Some(p)) = next {
+            app.peeked(p.unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn space_peeks_at_the_session_and_the_cursor_moving_peeks_at_the_next() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    on(&mut app, NATIVE);
+    assert!(shown(&app).contains("space to peek"), "a session row's hint");
+    assert!(pane(&app).is_empty(), "shut till asked");
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(pane(&app)[1..], ["  …"], "asked, not yet said");
+    peek_settles(&mut app).await;
+    let p = pane(&app);
+    assert!(
+        p[0].starts_with("─ fix the login · claude · needs input ──"),
+        "its name, harness and state: {p:?}"
+    );
+    assert_eq!(
+        p[1..],
+        ["  ab12cd34 is at work", "  step 2 of 3"],
+        "what `claude logs` printed, as its terminal showed it"
+    );
+    let again = app
+        .peek_due()
+        .expect("asked again while it stays")
+        .duration_since(std::time::Instant::now());
+    assert!(
+        again > std::time::Duration::from_secs(1) && again <= super::peek::AGAIN,
+        "{again:?}"
+    );
+    assert!(
+        row_of(&shown(&app), "fix the login").contains("needs input"),
+        "the list stays"
+    );
+    assert!(shown(&app).contains("space to close the peek"));
+    // The cursor moved: the next row is peeked at once it settles, and what
+    // the last said is not shown as its.
+    on(&mut app, HELD);
+    assert!(pane(&app)[0].starts_with("─ shop-sh · sh"), "{:?}", pane(&app));
+    assert_eq!(pane(&app)[1..], ["  …"]);
+    peek_settles(&mut app).await;
+    let p = pane(&app);
+    assert!(
+        p[1].starts_with("  shop-sh is not answering"),
+        "an ended one whose holder is gone: why, said {p:?}"
+    );
+    // Back, and asked again.
+    on(&mut app, NATIVE);
+    peek_settles(&mut app).await;
+    assert_eq!(pane(&app)[1..], ["  ab12cd34 is at work", "  step 2 of 3"]);
+    // Enter attaches as ever.
+    press(&mut app, KeyCode::Enter);
+    let hand = app.hand.take().expect("handed over");
+    assert_eq!(hand.key, NATIVE);
+    // Esc shuts it, and space again; neither clears the search.
+    app.filter = "login".into();
+    press(&mut app, KeyCode::Esc);
+    assert!(app.peek.is_none() && pane(&app).is_empty());
+    assert_eq!(app.filter, "login", "the pane shut first");
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.peek.is_some());
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.peek.is_none(), "space shuts it too");
+}
+
+#[tokio::test]
+async fn on_a_header_space_opens_no_pane_and_the_footer_says_why() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    let header = app.keys()[0].clone();
+    on(&mut app, &header);
+    assert!(matches!(app.selected(), Some(crate::rows::Line::Group(_))));
+    press(&mut app, KeyCode::Char(' '));
+    assert!(app.peek.is_none());
+    assert!(pane(&app).is_empty());
+    assert!(shown(&app).contains("space peeks at a session: put the cursor on one"));
+    // Open on a session, then onto the header: no pane, and why.
+    on(&mut app, NATIVE);
+    press(&mut app, KeyCode::Char(' '));
+    on(&mut app, &header);
+    assert!(pane(&app).is_empty());
+    assert_eq!(app.peek_due(), None, "nothing to ask");
+    assert!(shown(&app).contains("the peek shows a session: put the cursor on one"));
+    // A space typed on the command line is a space in it.
+    typed(&mut app, "make");
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(app.cmd.line.text(), "make ");
+    assert!(app.peek.is_some(), "still open, as it was");
+}
+
+#[tokio::test]
+async fn a_slow_peek_never_holds_a_key_up() {
+    let f = fixture();
+    let mut app = list(&f).await;
+    // Its harness takes two seconds to say anything.
+    std::fs::write(f.repo.join("peek-slow"), "2").unwrap();
+    on(&mut app, NATIVE);
+    let at = std::time::Instant::now();
+    press(&mut app, KeyCode::Char(' '));
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Up);
+    }
+    on(&mut app, HELD);
+    let _ = shown(&app);
+    assert!(
+        at.elapsed() < std::time::Duration::from_millis(500),
+        "keys and draws wait for no peek: {:?}",
+        at.elapsed()
+    );
+    // The row moved to is peeked at meanwhile, the slow one still on its way.
+    peek_settles(&mut app).await;
+    assert!(pane(&app)[1].starts_with("  shop-sh is not answering"));
+    assert!(
+        at.elapsed() < std::time::Duration::from_millis(1500),
+        "not after the slow one: {:?}",
+        at.elapsed()
+    );
+    assert!(!app.peeks.is_empty(), "the slow one still under way");
+    // Its answer, for a row the cursor has left, is not shown.
+    let late = app.peeks.join_next().await.unwrap().unwrap();
+    assert_eq!(late.0, NATIVE);
+    app.peeked(late);
+    assert!(pane(&app)[1].starts_with("  shop-sh is not answering"));
+}

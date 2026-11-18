@@ -125,6 +125,68 @@ fn new_ls_stop_rm() {
 }
 
 #[test]
+fn a_peek_at_a_held_shell_is_its_screen_now_and_leaves_it_as_it_was() {
+    use rl_detect::harness::{self, Owner, Peek, Session};
+    let Some(env) = Env::new() else { return };
+    let cwd = env.dir("peek");
+    let script = "printf '\\033[1mfirst\\033[m\\n'; i=0; while [ $i -lt 30 ]; do echo line $i; i=$((i+1)); done; \
+                  printf 'ready> '; sleep 30";
+    let (ok, name, err) = env.rl(&cwd, &["new", "--name-only", "--", "sh", "-c", script]);
+    assert!(ok, "{err}");
+    let dir = env.home().join("sessions").join(&name);
+    harness::set_holder(std::sync::Arc::new(rl::cmd::Store));
+    let sh = harness::of(rl_detect::Registry::builtin().profile("sh").unwrap(), None);
+    let s = Session {
+        harness: "sh".into(),
+        owner: Owner::Relay {
+            live: true,
+            dir: dir.clone(),
+        },
+        id: name.clone(),
+        session_id: String::new(),
+        cwd: cwd.clone(),
+        state: rl_core::state::RunState::Working,
+        words: String::new(),
+        name: name.clone(),
+        relay_name: None,
+        attached: false,
+    };
+    let mut peeked = Peek::Nothing(String::new());
+    wait_for("the shell's last line on its screen", || {
+        peeked = sh.peek(&s, 3);
+        matches!(&peeked, Peek::Lines(l) if l.last().is_some_and(|l| l == "ready>"))
+    });
+    assert_eq!(
+        peeked,
+        Peek::Lines(vec!["line 28".into(), "line 29".into(), "ready>".into()]),
+        "its last lines, as text"
+    );
+    let Peek::Lines(all) = sh.peek(&s, 100) else {
+        panic!("its screen");
+    };
+    assert_eq!(
+        all.first().map(String::as_str),
+        Some("first"),
+        "the history too, no escapes"
+    );
+    // Nothing was sent: it is still going, at its prompt as it was.
+    let row = env.ls().into_iter().find(|r| r["name"] == name).unwrap();
+    assert_eq!(row["status"], "live", "{row}");
+    assert_eq!(sh.peek(&s, 1), Peek::Lines(vec!["ready>".into()]));
+    let (ok, _, err) = env.rl(&cwd, &["stop", &name]);
+    assert!(ok, "{err}");
+    let gone = Session {
+        owner: Owner::Relay {
+            live: false,
+            dir: env.home().join("sessions").join("nobody"),
+        },
+        id: "nobody".into(),
+        ..s
+    };
+    assert!(matches!(sh.peek(&gone, 3), Peek::Nothing(_)));
+}
+
+#[test]
 fn a_stopped_session_reads_stopped_whatever_its_code() {
     let Some(env) = Env::new() else { return };
     let cwd = env.dir("hup");
