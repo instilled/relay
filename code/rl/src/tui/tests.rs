@@ -820,6 +820,41 @@ async fn ctrl_x_is_disarmed_by_any_other_key() {
 }
 
 #[tokio::test]
+async fn removing_a_shell_keeps_the_cursor_in_its_project_not_the_top_of_the_list() {
+    let f = fixture();
+    // A project above shop's, so the top of the list is somewhere else.
+    let art = beside(&f, "art");
+    let mut app = list(&f).await;
+    app.set_native(vec![
+        waiting(&f.repo),
+        NativeRow {
+            id: "ef56ab78".into(),
+            name: "paint the fence".into(),
+            ..waiting(&art)
+        },
+    ]);
+    app.reload();
+    let shop = format!("g:{}", f.repo.display());
+    let art_head = format!("g:{}", art.display());
+    assert_eq!(
+        app.keys(),
+        [art_head.as_str(), "n:claude:ef56ab78", shop.as_str(), HELD, NATIVE]
+    );
+    on(&mut app, HELD);
+    ctrl(&mut app, 'x');
+    ctrl(&mut app, 'x');
+    press(&mut app, KeyCode::Char('r'));
+    // The list read again before the remove has said it is done (the file
+    // watch saw the folder go): the cursor stays in shop all the same.
+    std::fs::remove_dir_all(f.home.session_dir("shop-sh")).ok();
+    app.reload();
+    assert_eq!(app.sel.as_deref(), Some(NATIVE), "{}", shown(&app));
+    app.finish().await;
+    assert!(app.keys().iter().all(|k| k != HELD));
+    assert_eq!(app.sel.as_deref(), Some(NATIVE), "the next row of its project");
+}
+
+#[tokio::test]
 async fn ctrl_x_twice_then_r_removes_an_ended_held_session_and_what_was_kept_for_it() {
     let f = fixture();
     let mut app = list(&f).await;
