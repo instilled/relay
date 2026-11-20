@@ -55,7 +55,9 @@ Folders are the truth: liveness is read from files and sockets; every write is `
   regexes over a held session's screen.
 - **Command line** (`tui/cmdline.rs`). A first word a profile claims starts that agent with the rest
   as its prompt; `!` runs the line in a held shell; `/` is a command.
-- **Attach.** A held session: its socket, the screen, then live bytes; `ctrl+\` detaches. A native
+- **Attach.** A held session: its socket, the screen, then live bytes; `ctrl+\` detaches: the byte
+  `0x1c`, or the escape a terminal sends once the program has switched on an enhanced keyboard
+  (kitty `ESC[92;5u`, xterm `ESC[27;5;92~`; `attach::find_detach`). A native
   one: its harness's attach argv in this terminal (`attach::native`). Which a row gets is
   `Harness::attach`. Coming back, the list takes the screen in one synchronized update and draws its
   first frame while the terminal settles (60 ms); what the terminal sent in the handover is dropped
