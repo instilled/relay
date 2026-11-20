@@ -9,6 +9,11 @@
 //! `regit`; `attach.held` / `attach.native` (enter → the session's first
 //! output); `return.held` / `return.native` (the session let go of → the
 //! list's first frame) and their parts.
+//!
+//! Besides the phases, `note` lines: `@<ms since born> <what>` — every input
+//! event the list reads (`key …`, `mouse <kind> <col>,<row>`, `paste`) and
+//! when the screen was taken back (`screen.taken`) and its settle done
+//! (`screen.settled`), so what came in a handover can be read off.
 
 use rl_core::Home;
 use std::io::Write;
@@ -65,6 +70,15 @@ pub fn since(phase: &str, at: Option<Instant>) {
 /// `phase` took from the process's birth until now.
 pub fn since_born(phase: &str) {
     since(phase, BORN.get().copied());
+}
+
+/// A line saying what happened now: `@<ms since born> <what>`.
+pub fn note(what: std::fmt::Arguments) {
+    if let Some(Some(log)) = LOG.get() {
+        let ms = BORN.get().map_or(0.0, |b| b.elapsed().as_secs_f64() * 1000.0);
+        let mut f = log.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = writeln!(f, "@{ms:.1} {what}");
+    }
 }
 
 static OPEN: Mutex<Vec<(&'static str, Instant)>> = Mutex::new(Vec::new());
