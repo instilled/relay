@@ -44,9 +44,60 @@ impl Ended {
 /// Splits typed bytes at the first `ctrl-\`: what came before it (to send),
 /// and whether a detach was asked for.
 pub(crate) fn split_detach(bytes: &[u8]) -> (&[u8], bool) {
-    match bytes.iter().position(|&b| b == DETACH) {
+    match find_detach(bytes) {
         Some(at) => (&bytes[..at], true),
         None => (bytes, false),
+    }
+}
+
+/// Where the first `ctrl-\` starts in typed bytes, however the terminal
+/// sends it: the plain byte (`0x1c`); or, once the attached program has
+/// switched on an enhanced keyboard, as an escape — the kitty keyboard
+/// protocol's `ESC [ 92 ; <mods> u` (Ghostty, kitty, WezTerm, iTerm2 with
+/// CSI u; the key may carry alternates, `92:…`, and the mods an event type,
+/// `5:1`; a release, `:3`, is no press) or xterm's modifyOtherKeys
+/// `ESC [ 27 ; <mods> ; 92 ~`, where the mods hold ctrl.
+pub(crate) fn find_detach(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            DETACH => return Some(i),
+            0x1b if bytes.get(i + 1) == Some(&b'[') => {
+                // The parameters up to the final byte.
+                let start = i + 2;
+                let end = (start..bytes.len()).find(|&j| (0x40..=0x7e).contains(&bytes[j]));
+                if let Some(end) = end
+                    && is_ctrl_backslash(&bytes[start..end], bytes[end])
+                {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Whether a CSI's parameters and final byte are a press of `ctrl-\`.
+fn is_ctrl_backslash(params: &[u8], fin: u8) -> bool {
+    let Ok(params) = std::str::from_utf8(params) else {
+        return false;
+    };
+    let fields: Vec<&str> = params.split(';').collect();
+    // The number before any `:` sub-parameters.
+    let first = |f: &str| f.split(':').next().and_then(|n| n.parse::<u32>().ok());
+    // Ctrl among the modifiers (1 + a bit set: ctrl is 4), and not a release.
+    let ctrl = |f: &str| {
+        let mut parts = f.split(':');
+        let mods = parts.next().and_then(|n| n.parse::<u32>().ok());
+        let event = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(1);
+        mods.is_some_and(|m| m >= 1 && (m - 1) & 4 != 0) && event != 3
+    };
+    match (fin, fields.as_slice()) {
+        (b'u', [key, mods, ..]) => first(key) == Some(92) && ctrl(mods),
+        (b'~', [code, mods, key]) => first(code) == Some(27) && ctrl(mods) && first(key) == Some(92),
+        _ => false,
     }
 }
 
@@ -243,5 +294,36 @@ mod tests {
         assert_eq!(split_detach(b"ab\x1ccd"), (b"ab".as_slice(), true));
         assert_eq!(split_detach(b"\x1c"), (b"".as_slice(), true));
         assert_eq!(split_detach(b""), (b"".as_slice(), false));
+    }
+
+    #[test]
+    fn ctrl_backslash_is_heard_however_the_terminal_sends_it() {
+        // The kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2 CSI u).
+        assert_eq!(split_detach(b"ab\x1b[92;5u"), (b"ab".as_slice(), true));
+        assert_eq!(find_detach(b"\x1b[92;5:1u"), Some(0), "with the event type: a press");
+        assert_eq!(find_detach(b"\x1b[92;5:2u"), Some(0), "a repeat");
+        assert_eq!(find_detach(b"\x1b[92;5:3u"), None, "a release is no press");
+        assert_eq!(find_detach(b"\x1b[92:124;5u"), Some(0), "with alternate keys");
+        assert_eq!(find_detach(b"x\x1b[92;7u"), Some(1), "ctrl+alt holds ctrl");
+        assert_eq!(find_detach(b"\x1b[92;133u"), Some(0), "ctrl with num lock");
+        // xterm's modifyOtherKeys.
+        assert_eq!(find_detach(b"\x1b[27;5;92~"), Some(0));
+        // Not it: a plain backslash, alt+backslash, ctrl with another key,
+        // arrows and other escapes, a sequence cut short.
+        for not in [
+            b"\x1b[92u".as_slice(),
+            b"\x1b[92;3u",
+            b"\x1b[97;5u",
+            b"\x1b[27;5;97~",
+            b"\x1b[A",
+            b"\x1b[1;5A",
+            b"\x1b[200~paste\x1b[201~",
+            b"\x1b",
+            b"\x1b[92;5",
+        ] {
+            assert_eq!(find_detach(not), None, "{not:?}");
+        }
+        // The first of several, after what was typed.
+        assert_eq!(find_detach(b"hi\x1b[A\x1b[92;5u\x1c"), Some(5));
     }
 }

@@ -207,7 +207,7 @@ async fn through(
             }
             k = keys.recv(), if keys_open => match k {
                 None => keys_open = false,
-                Some(b) => match b.iter().position(|&c| c == DETACH) {
+                Some(b) => match super::find_detach(&b) {
                     Some(at) => {
                         if at > 0 {
                             let _ = sp.input.send(b[..at].to_vec()).await;
@@ -318,6 +318,16 @@ mod tests {
         assert_eq!(back, Back::Detached);
         assert!(out.contains("got hi"), "{out}");
         assert!(gone(pid), "hung up, it ended");
+    }
+
+    #[tokio::test]
+    async fn ctrl_backslash_as_the_kitty_keyboard_sends_it_lets_go_too() {
+        // What Ghostty sends once the attached program asks for the kitty
+        // keyboard: the bytes before it still reach the session.
+        let sp = sh("read line; echo \"got $line\"; sleep 30");
+        let (out, back) = through(sp, &[b"hi\r", b"\x1b[92;5u"], &[]).await;
+        assert_eq!(back, Back::Detached);
+        assert!(out.contains("got hi"), "{out}");
     }
 
     #[tokio::test]
