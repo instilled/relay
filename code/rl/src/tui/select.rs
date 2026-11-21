@@ -13,6 +13,15 @@ impl App {
         if self.selected().is_some() {
             return;
         }
+        // Its line has left after a remove: where it was, in its project.
+        if !self.near.is_empty() {
+            let keys = self.keys();
+            let near = std::mem::take(&mut self.near);
+            if let Some(k) = near.into_iter().find(|k| keys.contains(k)) {
+                self.sel = Some(k);
+                return;
+            }
+        }
         let lines = self.lines();
         let first = lines
             .iter()
@@ -58,6 +67,7 @@ impl App {
         if key != self.sel {
             self.moved = std::time::Instant::now();
         }
+        self.near.clear();
         self.sel = key;
     }
 

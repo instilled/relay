@@ -84,9 +84,6 @@ pub struct Done {
     pub said: String,
     /// The line the cursor goes to, once it is there.
     pub select: Option<String>,
-    /// Where the cursor goes once its own line has left: the first of these
-    /// still on the list (`App::near_keys`).
-    pub near: Vec<String>,
     /// A row gone for good, whose name, pin, hide and place go with it.
     pub forget: Option<String>,
     /// What the terminal goes to now: a conversation carried on.
@@ -119,7 +116,6 @@ impl Done {
         Done {
             said: s.into(),
             select: None,
-            near: Vec::new(),
             forget: None,
             hand: None,
             gave_up: false,
@@ -181,6 +177,11 @@ pub struct App {
     /// A line the cursor goes to once it is on the list: a session just
     /// started in a harness's background, not listed yet.
     pub awaiting: Option<String>,
+    /// Where the cursor goes when the line it is on leaves the list, best
+    /// first (`near_keys`): kept from when a remove began, for whichever
+    /// reload takes the line away — the file watch's, the tick's or the
+    /// remove's own — and dropped once the cursor moves (`select`).
+    pub near: Vec<String>,
     /// The harnesses are to be asked for their sessions now (`main_loop`).
     pub ask_native: bool,
     /// What the list is narrowed to (`query`).
@@ -258,6 +259,7 @@ impl App {
             badges,
             prs: HashMap::new(),
             awaiting: None,
+            near: Vec::new(),
             ask_native: false,
             filter: String::new(),
             search: None,

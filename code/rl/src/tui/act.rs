@@ -345,9 +345,6 @@ impl App {
         if d.ask_native {
             self.ask_native = true;
         }
-        if !d.near.is_empty() && self.selected().is_none() && matches!(self.mode, Mode::List) {
-            self.select_near(&d.near);
-        }
         if let Some(k) = d.select {
             if self.keys().contains(&k) {
                 if matches!(self.mode, Mode::List) {
@@ -437,13 +434,12 @@ impl App {
                 // later by the same name is a new one. One still going is
                 // stopped first, by its harness.
                 let a = sources::harness_of(&session.harness);
-                let near = self.near_keys();
+                self.near = self.near_keys();
                 self.say(format!("removing {title}…"));
                 self.work.spawn(async move {
                     let run = tokio::task::spawn_blocking(move || a.remove(&session)).await;
                     match run {
                         Ok(Ok(())) => Done {
-                            near,
                             forget: Some(key),
                             ask_native: true,
                             ..Done::said(format!("removed {title}"))
