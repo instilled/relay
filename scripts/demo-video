@@ -57,10 +57,16 @@ wait_s 3
 
 # Typing starts an agent in the row's project.
 k Down; wait_s 0.6
-typed "codex make the checkout tests deterministic"
+typed "codex make the countdown tests deterministic"
 wait_s 1.5
 k Enter
 wait_s 3
+
+# A peek, without attaching: space on Antigravity, then up to Claude.
+k End; wait_s 1
+k Space; wait_s 2.5
+k Up; wait_s 2
+k Escape; wait_s 1
 
 # Into the one that needs you, and back out: it keeps running.
 k Home; wait_s 1

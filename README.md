@@ -4,9 +4,9 @@ Relay is `claude agents` for every harness: one list of your agent sessions (Cla
 Antigravity and the like) and your shells, in the terminal you already use. Enter attaches. Agents
 can message each other. No daemon, no model calls; macOS and Linux.
 
-![Relay: typing starts a Codex thread, enter attaches to the Claude that needs you and ctrl+\ comes back, the shells and hidden toggles, grouped by state](docs/img/demo.gif)
+![Relay: Claude, Codex, Antigravity and shells in one list; typing starts a Codex thread, space peeks, enter attaches to the Claude that needs you and ctrl+\ comes back, the shells and hidden toggles, grouped by state](docs/img/demo.gif)
 
-<sub>Typing a prompt starts an agent; `enter` attaches, `ctrl+\` comes back and leaves it running;
+<sub>Typing a prompt starts an agent; `space` peeks; `enter` attaches, `ctrl+\` comes back and leaves it running;
 `ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by state.</sub>
 
 ## Why Relay
@@ -236,9 +236,9 @@ empty thread (no name, no prompt yet) isn't listed.
 After setup, every agent has three tools from Relay's MCP server: `who`, `send` and `inbox`. Ask in
 plain words:
 
-> ask the codex session in shop-api to review my diff and send me what it finds
+> ask the codex session in moonbase to review my diff and send me what it finds
 
-> when the tests pass, tell the claude session "web" to rebase on main
+> when the tests pass, tell the claude session "pixel-pets" to rebase on main
 
 Codex is pinged when mail arrives; an idle Claude background session is woken to read it (stopped
 and carried on with the message as its prompt), a busy one hears of it through its hooks; the others read it when they call `inbox`. The
