@@ -6,8 +6,9 @@ can message each other. No daemon, no model calls; macOS and Linux.
 
 ![Relay: Claude, Codex, Antigravity and shells in one list; typing starts a Codex thread, space peeks, enter attaches to the Claude that needs you and ctrl+\ comes back, the shells and hidden toggles, grouped by state](docs/img/demo.gif)
 
-<sub>Typing a prompt starts an agent; `space` peeks; `enter` attaches, `ctrl+\` comes back and leaves it running;
-`ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by state.</sub>
+<sub>Typing a prompt starts an agent; `space` peeks; `enter` attaches, `ctrl+\` comes back and
+leaves it running; `ctrl+l` / `ctrl+o` toggle shells and hidden rows; `ctrl+s` groups by
+state.</sub>
 
 ## Why Relay
 
@@ -38,10 +39,10 @@ rl
 
 It downloads `rl` and `rl-session` for your machine, checks their sha256 and puts both in
 `~/.local/bin`. It warns when that folder isn't on your `PATH`, or when another `rl` comes first.
-`--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version 2026.11-17-a1b2c3d4e` (or `RELAY_VERSION`) a
-given release; pass them as `sh -s -- --bin-dir DIR`. **Update:** run the same line again.
-Everything Relay keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names the release
-and commit; put it in bug reports. To take it out again, see [Uninstall](#uninstall).
+`--bin-dir DIR` (or `RELAY_BIN_DIR`) installs elsewhere, `--version 2026.11-17-a1b2c3d4e` (or
+`RELAY_VERSION`) a given release; pass them as `sh -s -- --bin-dir DIR`. **Update:** run the same
+line again. Everything Relay keeps is in `~/.relay` (`RELAY_HOME` moves it). `rl --version` names
+the release and commit; put it in bug reports. To take it out again, see [Uninstall](#uninstall).
 
 The Linux binaries are static (musl), so any distribution runs them. The macOS ones are signed
 ad hoc, not notarized: installed this way macOS doesn't ask. Downloaded from the releases page in a
@@ -65,9 +66,9 @@ binaries (keep it set where you run `rl`). `rl` runs from your clone and rebuild
 source changes, so **update** with `git pull`.
 
 **Releasing:** `gh workflow run release` on main. A release is its day and commit: `rl --version`
-says `2026.11-17-a1b2c3d4e`, which is also its tag (`dev-…` for a build of your own). The workflow builds the four targets with `scripts/package` and opens a draft
-release with the tarballs, their sha256 and `install.sh` (`scripts/install-release`); publish the
-draft once it looks right.
+says `2026.11-17-a1b2c3d4e`, which is also its tag (`dev-…` for a build of your own). The workflow
+builds the four targets with `scripts/package` and opens a draft release with the tarballs, their
+sha256 and `install.sh` (`scripts/install-release`); publish the draft once it looks right.
 
 ## Setup
 
@@ -123,12 +124,12 @@ rl setup --remove   # take the hooks and the server out again (--harness H limit
 git checkout, worktrees under their main one), or grouped by state: Needs input, Working, Done.
 Claude's background sessions and Codex's threads are on it as their own tools show them, and
 agents in other terminals are on it through their hooks (a Claude open in another terminal by the
-name Claude gives it). `/project <folder>` adds a project with
-nothing running in it yet; the cursor lands on it, so typing starts something there.
+name Claude gives it). `/project <folder>` adds a project with nothing running in it yet; the
+cursor lands on it, so typing starts something there.
 
-`enter` attaches; `ctrl+\` detaches and leaves it running (from a Claude or Codex session of
-their own, their own detach or quit brings you back). A session Relay holds lives in a small process of its own
-(`rl-session`), so closing the terminal or the laptop costs nothing.
+`enter` attaches; `ctrl+\` detaches and leaves it running (from a Claude or Codex session of their
+own, their own detach or quit brings you back). A session Relay holds lives in a small process of
+its own (`rl-session`), so closing the terminal or the laptop costs nothing.
 
 `space` peeks without attaching: a pane under the list shows what the session under the cursor is
 doing (Claude's `claude logs`, a Codex thread's last turns, a held session's screen) and follows the
@@ -137,13 +138,14 @@ cursor as you move; nothing is sent to it. `space` or `esc` shuts it.
 Feels slow? `RL_TRACE=1 rl` writes how long each step took (start, key → frame, attach, return) to
 `~/.relay/trace.log`.
 
-**Start by typing.** The line at the bottom starts things in the project of the row under the cursor (its root, not a session's own worktree):
+**Start by typing.** The line at the bottom starts things in the project of the row under the cursor
+(its root, not a session's own worktree):
 
 ![Typing a prompt on the command line: agent · codex](docs/img/command-line.svg)
 
-- `claude fix the login`, `codex …`, `agy …` (`gemini` and `antigravity` also start `agy`): that agent, the rest
-  of the line its first prompt. Claude starts in its own background (`claude --bg`), Codex on its
-  app-server daemon, the others in a session Relay holds.
+- `claude fix the login`, `codex …`, `agy …` (`gemini` and `antigravity` also start `agy`): that
+  agent, the rest of the line its first prompt. Claude starts in its own background (`claude --bg`),
+  Codex on its app-server daemon, the others in a session Relay holds.
 - `! make test`: a shell command, in a shell Relay holds that stays a shell when it's done.
 - `/name`: a command (below).
 - anything else starts the default (`/default`): a shell command, or the whole line as a prompt to
@@ -241,8 +243,9 @@ plain words:
 > when the tests pass, tell the claude session "pixel-pets" to rebase on main
 
 Codex is pinged when mail arrives; an idle Claude background session is woken to read it (stopped
-and carried on with the message as its prompt), a busy one hears of it through its hooks; the others read it when they call `inbox`. The
-[messaging guide](docs/messaging.md) has how it works and more use cases.
+and carried on with the message as its prompt), a busy one hears of it through its hooks; the others
+read it when they call `inbox`. The [messaging guide](docs/messaging.md) has how it works and more
+use cases.
 
 ## From the shell
 
@@ -286,8 +289,8 @@ conversation content is kept.
 
 - Relay never reads a harness's screen to act or types into one: it uses only what a harness
   documents (its CLI, `claude agents --json`, Codex's app-server, the hooks). So a Claude is renamed
-  only when Relay next starts it, and waking an idle Claude for mail carries its conversation on in a
-  new background session under a new id (your name, pin and colour move to it; the old row is
+  only when Relay next starts it, and waking an idle Claude for mail carries its conversation on in
+  a new background session under a new id (your name, pin and colour move to it; the old row is
   hidden, not removed).
 - `rl mcp` in Codex can't tell which thread called it: a Codex caller passes `from`/`as` itself.
 - Antigravity has no hooks or screen patterns yet, so its state is a guess.

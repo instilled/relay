@@ -41,14 +41,15 @@ Folders are the truth: liveness is read from files and sockets; every write is `
 | `config.json` | harnesses, badges, declined setup, list prefs (grouping, toggles, order, hidden, pins, names, colours). Strict |
 | `detect/*.yaml`, `plugins/` | your profile overrides; badge scripts (`gh-pr`) |
 | `drift/` | what Relay noticed a harness change in |
+| `trace.log` | phase timings, only under `RL_TRACE=1` |
 
 ## The list
 
-- **Sources.** Held sessions from `sessions/`, hooked ones from `state/`, Claude's and Codex's own by
-  asking them (`Harness::sessions`), each on its own task and interval (`tui::live`): a slow one holds
-  up no other, a failing one keeps its last rows marked stale. The first frame waits for none of
-  them. What the file watch, the 3s tick and a lister's answer make the list read again is read off
-  the UI thread (`tui::Reads`), one read at a time; a read begun before a newer one is dropped.
+- **Sources.** Held sessions from `sessions/`, hooked ones from `state/`, Claude's and Codex's own
+  by asking them (`Harness::sessions`), each on its own task and interval (`tui::live`): a slow one
+  holds up no other, a failing one keeps its last rows marked stale. The first frame waits for none
+  of them. What the file watch, the 3s tick and a lister's answer make the list read again is read
+  off the UI thread (`tui::Reads`), one read at a time; a read begun before a newer one is dropped.
 - **Rows.** `rows/` merges and dedupes them (a native row hides the hooked row of the same session)
   and groups them under a project: a folder you named, else its git checkout (`git::project`;
   worktrees under their main one). State comes from the hooks, then the harness's listing, then
@@ -76,8 +77,8 @@ Folders are the truth: liveness is read from files and sockets; every write is `
 
 A harness is `detect/<name>.yaml` plus the code that binds it. The built-in profiles are compiled in
 (`rl-detect/src/registry.rs`) and `~/.relay/detect/*.yaml` merges over them field by field; unknown
-keys are an error. A profile is data (commands, arguments, words); what Relay does with them is code,
-on stable contracts only: a CLI's documented words, `claude agents --json`, Codex's app-server
+keys are an error. A profile is data (commands, arguments, words); what Relay does with them is
+code, on stable contracts only: a CLI's documented words, `claude agents --json`, Codex's app-server
 schema, the hooks a harness calls. Relay never reads a screen to act or types into one, so a new
 harness version can turn a feature off (noticed as drift) but never misfire.
 
@@ -91,11 +92,12 @@ harness version can turn a feature off (noticed as drift) but never misfire.
 | `sessions.attach` `start` `stop` `remove` `ping` `logs` `rename` | argv or RPC for each, with `{id}`, `{name}`, `{text}` |
 | `mcp`, `settings` | where the `relay` MCP server is registered; global keys setup sets |
 
-A profile alone adds a harness that uses integration Relay already has (held sessions, a hook dialect,
-an MCP style, a listing a reader parses). A session protocol of its own, like Codex's, needs code.
+A profile alone adds a harness that uses integration Relay already has (held sessions, a hook
+dialect, an MCP style, a listing a reader parses). A session protocol of its own, like Codex's,
+needs code.
 
-**The trait** (`rl-detect/src/harness.rs`) is a set of intents; each harness binds its own steps, and
-callers ask an intent and show what came of it, never a harness's name:
+**The trait** (`rl-detect/src/harness.rs`) is a set of intents; each harness binds its own steps,
+and callers ask an intent and show what came of it, never a harness's name:
 
 ```rust
 pub trait Harness: Send + Sync {
@@ -160,3 +162,11 @@ Tests never touch the real `~/.relay`, `~/.claude`, `~/.codex` or `~/.gemini` (t
 (`fixtures/stand-in-codex-daemon`); tests against the real CLIs are `#[ignore]`. CI runs
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test --workspace` and the install checks.
+
+## The README's pictures
+
+`scripts/demo-stage` builds Relay and stages a made-up machine in a temp dir: stand-ins for
+`claude`, `codex` and `agy`, projects `moonbase` (with a worktree), `pixel-pets` and `relay`, and
+`PATH` cut down so no real harness runs. `scripts/screenshots` captures the list in tmux to SVG
+(`scripts/ansi2svg.py`); `scripts/demo-video` records the GIF (`scripts/record.py`, needs
+`rsvg-convert` and `ffmpeg`). Both fail if a real path shows up in a frame.
