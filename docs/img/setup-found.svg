@@ -33,10 +33,9 @@
 <text x="47.6 56.0" y="125" fill="#1d9e75">▀▀</text>
 <text x="81.2 89.6 98.0 106.4" y="125" fill="#1d9e75">▀▀▀▀</text>
 <text x="131.6 140.0" y="125" fill="#1d9e75">▀▀</text>
-<text x="30.8" y="161" opacity="0.55">✦</text>
-<text x="47.6 56.0 64.4 72.8 81.2 89.6 98.0 106.4 114.8 123.2 131.6" y="161" opacity="0.55">antigravity</text>
-<text x="156.8 165.2 173.6" y="161" opacity="0.55">not</text>
-<text x="190.4 198.8 207.2 215.6 224.0 232.4 240.8 249.2 257.6" y="161" opacity="0.55">installed</text>
+<text x="30.8" y="161">✦</text>
+<text x="47.6 56.0 64.4 72.8 81.2 89.6 98.0 106.4 114.8 123.2 131.6" y="161" font-weight="bold">antigravity</text>
+<text x="156.8 165.2 173.6 182.0 190.4" y="161" fill="#1d9e75">found</text>
 <text x="282.8 291.2 299.6" y="161" opacity="0.55">mcp</text>
 <text x="316.4 324.8 333.2 341.6 350.0" y="161" opacity="0.55">relay</text>
 <text x="30.8" y="179" fill="#d97757">✻</text>

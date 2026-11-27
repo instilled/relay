@@ -69,8 +69,8 @@ if [ "$1" = agents ]; then
   now=$(($(date +%s) * 1000))
   cat <<JSON
 [
- {"id":"5c1e9a20","cwd":"$DEMO_WORK/web","kind":"background","startedAt":$((now - 2400000)),"sessionId":"5c1e9a20-0000-4000-8000-000000000001","name":"checkout page redesign","status":"busy","state":"working"},
- {"id":"7d40b3f1","cwd":"$DEMO_WORK/web","kind":"background","startedAt":$((now - 7200000)),"sessionId":"7d40b3f1-0000-4000-8000-000000000002","name":"bump vite to 7","state":"done"}
+ {"id":"5c1e9a20","cwd":"$DEMO_WORK/pixel-pets","kind":"background","startedAt":$((now - 2400000)),"sessionId":"5c1e9a20-0000-4000-8000-000000000001","name":"adoption page redesign","status":"busy","state":"working"},
+ {"id":"7d40b3f1","cwd":"$DEMO_WORK/pixel-pets","kind":"background","startedAt":$((now - 7200000)),"sessionId":"7d40b3f1-0000-4000-8000-000000000002","name":"bump vite to 7","state":"done"}
 ]
 JSON
   exit 0
@@ -88,9 +88,9 @@ hook SessionStart ""
 hook UserPromptSubmit ",\"prompt\":\"$prompt\""
 case $DEMO_STATE in
   needs)
-    printf '⏺ Read src/routes/orders.ts (212 lines)\n'
-    printf '⏺ Update src/routes/orders.ts with a token bucket per API key\n\n'
-    printf ' Bash command\n   npm test -- orders\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n'
+    printf '⏺ Read src/routes/launches.ts (212 lines)\n'
+    printf '⏺ Update src/routes/launches.ts with a token bucket per API key\n\n'
+    printf ' Bash command\n   npm test -- launches\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n'
     last() { hook Notification ',"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"'; }
     ;;
   done)
@@ -98,8 +98,8 @@ case $DEMO_STATE in
     last() { hook Stop ""; }
     ;;
   *)
-    printf '⏺ Read src/api/orders.ts\n⏺ Search "cursor" in src/\n'
-    printf '\033[38;2;217;119;87m✶\033[0m Adding cursor pagination…\n'
+    printf '⏺ Read src/dock.ts\n⏺ Search "retry" in src/\n'
+    printf '\033[38;2;217;119;87m✶\033[0m %s\n' "${DEMO_DOING:-Adding backoff to the dock requests…}"
     last() { hook PostToolUse ',"tool_name":"Edit"'; }
     ;;
 esac
@@ -109,7 +109,35 @@ while :; do last; sleep 2; done
 EOF
 chmod +x "$tmp/bin/claude"
 
-# The projects: shop-api with a worktree, and web.
+# Antigravity: `agy -i <prompt>` prints a plausible screen and keeps busy
+# (no hooks: the list reads it as working while it writes); `agy mcp …` is
+# the stand-in `rl setup`'s tests register the MCP server with.
+cp "$root/code/fixtures/stand-in-agy-mcp" "$tmp/bin/agy-mcp"
+mkdir -p "$tmp/home/.gemini/config"
+cat >"$tmp/bin/agy" <<'EOF'
+#!/bin/sh
+[ "$1" = mcp ] && exec agy-mcp "$@"
+[ "$1" = -i ] && shift
+printf '\033[38;2;66;133;244m◆\033[0m Antigravity\n\n'
+printf '\033[2m>\033[0m %s\n\n' "$*"
+for step in 'Read CHANGELOG.md' 'Read git log 2026.11-14..HEAD (9 commits)' \
+  'Grouped 9 changes: 4 fixes, 3 features, 2 chores'; do
+  printf '● %s\n' "$step"
+  sleep 1
+done
+# The spinner, redrawn in place: output keeps coming, so it reads as working.
+printf '\n'
+i=0
+while :; do
+  case $((i % 4)) in 0) c='⠋' ;; 1) c='⠙' ;; 2) c='⠹' ;; *) c='⠸' ;; esac
+  printf '\033[1A\033[2K\033[38;2;66;133;244m%s\033[0m Drafting the release notes… (%ss)\n' "$c" "$i"
+  i=$((i + 1))
+  sleep 1
+done
+EOF
+chmod +x "$tmp/bin/agy"
+
+# The projects: moonbase with a worktree, pixel-pets, and relay itself.
 work="$tmp/home/work"
 export DEMO_WORK="$work"
 repo() {
@@ -119,9 +147,10 @@ repo() {
   git -C "$1" add README.md
   git -C "$1" commit -q -m "first"
 }
-repo "$work/shop-api"
-repo "$work/web"
-git -C "$work/shop-api" worktree add -q -b orders-pagination "$work/shop-api/.worktrees/orders-pagination"
+repo "$work/moonbase"
+repo "$work/pixel-pets"
+repo "$work/relay"
+git -C "$work/moonbase" worktree add -q -b docking-retries "$work/moonbase/.worktrees/docking-retries"
 
 # The list's badges ask gh; there is none here, and none is wanted. The
 # first start's setup question is not wanted either.
@@ -134,7 +163,7 @@ printf '{"badges": [], "list": {"hidden": [{"key": "n:claude:7d40b3f1", "at": "%
 # npm: a dev server that says it is ready and stays up (a command row, ▸).
 cat >"$tmp/bin/npm" <<'EOF'
 #!/bin/sh
-printf '\n> web@0.0.0 dev\n> vite\n\n  VITE v7.0.4  ready in 412 ms\n\n  ➜  Local:   http://localhost:5173/\n'
+printf '\n> pixel-pets@0.0.0 dev\n> vite\n\n  VITE v7.0.4  ready in 412 ms\n\n  ➜  Local:   http://localhost:5173/\n'
 while :; do sleep 60; done
 EOF
 chmod +x "$tmp/bin/npm"
@@ -144,14 +173,16 @@ rl_new() { # rl_new <folder> <DEMO_STATE> rl-new-args...
   (cd "$dir" && DEMO_STATE=$state rl new --name-only "$@")
 }
 
-api_needs=$(rl_new "$work/shop-api" needs --harness claude -- "add rate limiting to /orders")
-pag=$(rl_new "$work/shop-api/.worktrees/orders-pagination" working --harness claude -- "paginate GET /orders")
-web_done=$(rl_new "$work/web" "done" --harness claude -- "fix the cart total rounding")
-(cd "$work/shop-api" && rl new --name-only --harness codex -- "fix the flaky checkout test" >/dev/null)
-(cd "$work/web" && rl new --name-only -- npm run dev >/dev/null)
+api_needs=$(rl_new "$work/moonbase" needs --harness claude -- "add rate limiting to /launches")
+dock=$(rl_new "$work/moonbase/.worktrees/docking-retries" working --harness claude -- "retry dock requests with backoff")
+web_done=$(rl_new "$work/pixel-pets" "done" --harness claude -- "fix the hunger meter rounding")
+(cd "$work/moonbase" && rl new --name-only --harness codex -- "fix the flaky countdown test" >/dev/null)
+(cd "$work/pixel-pets" && rl new --name-only -- npm run dev >/dev/null)
+relay_claude=$(cd "$work/relay" && DEMO_DOING="Drawing the peek pane under the list…" DEMO_STATE=working rl new --name-only --harness claude -- "add a peek pane under the list")
+(cd "$work/relay" && rl new --name-only --harness antigravity -- "write the release notes for 2026.11" >/dev/null)
 # A shell of your own (❯), there to type in.
-(cd "$work/shop-api" && rl new --name-only >/dev/null)
-: "$pag" "$web_done"
+(cd "$work/moonbase" && rl new --name-only >/dev/null)
+: "$dock" "$web_done" "$relay_claude"
 
 # Set up, as a user would, through the wizard (the stand-ins take the MCP
 # registration), so the footer has no setup notice. Its steps are

@@ -46,11 +46,11 @@ own address (`from`, `as`): tell it which row it is if it asks.
 ## Use cases
 
 What you type to an agent. Name the other session by what the list shows for it: its name, the name
-you gave it, or its folder ("the codex session in shop-api"); the agent calls `who` for the address.
+you gave it, or its folder ("the codex session in moonbase"); the agent calls `who` for the address.
 
 **A review, findings back.**
 
-> Ask the codex session in shop-api to review my uncommitted diff in this repo and send its
+> Ask the codex session in moonbase to review my uncommitted diff in this repo and send its
 > findings back to you. Then fix what it found.
 
 Codex is pinged, reviews and sends back; Claude reads the findings at the end of its turn (the hook
@@ -58,8 +58,8 @@ prompts it), or at once if it had gone idle in its background (Relay wakes it).
 
 **A hand-off when something is done.**
 
-> Run the test suite until it passes. When it does, tell the claude session "web" to rebase on
-> main and rerun its build.
+> Run the test suite until it passes. When it does, tell the claude session "pixel-pets" to
+> rebase on main and rerun its build.
 
 **A planner and workers.**
 
@@ -73,9 +73,9 @@ claude`) and name them with `ctrl+r`.
 
 **Two repos, one API change.**
 
-> I'm changing the `/orders` response in this repo (shop-api): `total` becomes `total_cents`.
-> Send the codex session in web the new shape and ask it to update the client and tell you when
-> it's done. Don't merge until it replies.
+> I'm changing the `/launches` response in this repo (moonbase): `eta` becomes `eta_unix`. Send
+> the codex session in moonbase-app the new shape and ask it to update the client and tell you
+> when it's done. Don't merge until it replies.
 
 **Status from everyone.**
 
@@ -91,4 +91,5 @@ claude`) and name them with `ctrl+r`.
 - `who` lists what the list shows: sessions Relay holds, Claude's and Codex's own background
   sessions, and agents in other terminals that Relay's hooks told it of.
 - An agent that isn't set up (`rl setup --check`) has no `relay` tools: run `rl setup`, or `/setup`
-  in the list. Codex asks you to trust Relay's hook once (`/hooks`); Claude may ask you to review it.
+  in the list. Codex asks you to trust Relay's hook once (`/hooks`); Claude may ask you to review
+  it.
